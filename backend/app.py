@@ -9,6 +9,7 @@ TODO:
   4. Build the user_content with CONTEXT + QUESTION.
   5. Parse citation numbers from the answer; return them to the frontend.
 """
+import os
 import re
 import sys
 from pathlib import Path
@@ -57,13 +58,37 @@ numbers shown in the context. Place the citation immediately after the claim it 
 sources do not cover."""
 
 
+# Relevance gate. Calibrated on the Gemini index (in-domain top scores ~0.73–0.79,
+# out-of-domain ~0.49–0.61): if the best dense-cosine match is below MIN_TOP_SCORE
+# we treat the question as out-of-scope and abstain WITHOUT calling the LLM — a
+# cheap, hard guarantee against answering when nothing relevant was retrieved
+# (also screens off-topic and injected prompts). Re-calibrate per embedding
+# backend; env-tunable.
+TOP_K = int(os.environ.get("RETRIEVAL_K", "5"))
+MIN_TOP_SCORE = float(os.environ.get("RETRIEVAL_MIN_SCORE", "0.66"))
+ABSTAIN_REPLY = (
+    "The provided 14 CFR sources don't contain anything relevant to that question, "
+    "so I can't answer it from the corpus."
+)
+
+
 @app.route("/api/chat", methods=["POST"])
 def chat():
     user_message = request.json["message"]
 
-    # Retrieve the top-K most relevant chunks, then augment the prompt with a
-    # numbered context block so the model can ground its answer and cite sources.
-    hits = search(user_message, INDEX, k=5)
+    # Retrieve the top-K most relevant chunks.
+    hits = search(user_message, INDEX, k=TOP_K)
+
+    # Relevance gate: if the best dense-cosine match is below the bar, abstain up
+    # front — no LLM call, no chance to hallucinate an answer the corpus can't
+    # support. Gate on dense_score (raw cosine), not the hybrid `score`, which is
+    # rank-based and not comparable to the calibrated cosine threshold.
+    top_dense = max((h["dense_score"] for h in hits), default=0.0)
+    if not hits or top_dense < MIN_TOP_SCORE:
+        return jsonify({"reply": ABSTAIN_REPLY, "citations": [], "abstained": True})
+
+    # Augment the prompt with a numbered context block so the model can ground
+    # its answer and cite sources.
     context = "\n\n".join(f"[{i + 1}] {h['text']}" for i, h in enumerate(hits))
     user_content = f"CONTEXT:\n{context}\n\nQUESTION:\n{user_message}"
 
