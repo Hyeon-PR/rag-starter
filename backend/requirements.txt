@@ -2,5 +2,6 @@ flask>=3.0
 flask-cors>=4.0
 anthropic>=0.40
 python-dotenv>=1.0
-sentence-transformers>=3.0
-pypdf>=4.0
+voyageai>=0.3          # embedding backend EMBED_BACKEND=voyage
+google-genai>=1.0      # embedding backend EMBED_BACKEND=gemini
+numpy>=1.26
