@@ -17,6 +17,8 @@ __pycache__/
 # index.pkl is a large, regenerable build artifact (python indexer.py)
 index.pkl
 *.pkl
+# data/ holds the eCFR XML cache + chunked corpus (regenerable via cfr_ingest.py)
+data/
 
 # --- Node / frontend ---
 node_modules/
