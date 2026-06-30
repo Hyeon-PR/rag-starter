@@ -4,29 +4,51 @@ Map of the docs in this repo.
 
 | Doc | What it covers |
 |---|---|
-| [`../README.md`](../README.md) | Project overview, setup, and the lab assignment (build the index, wire retrieval + citations). **Start here.** |
-| [`ARCHITECTURE.md`](ARCHITECTURE.md) | Production-grade target architecture — an upgrade path from the Apollo starter toward the **14 CFR contest corpus**, organized against the 6-category evaluation rubric (retrieval, generation, memory, data pipeline, cost/latency, safety, validation). |
-| [`embedding-model.md`](embedding-model.md) | Decision note: why the design uses **`voyage-4-large`** (bake-off vs `voyage-law-2`, `voyage-4-nano` as the local fallback) for 14 CFR. |
+| [`../README.md`](../README.md) | Project overview, pipeline, setup, and how to build/run the **14 CFR** RAG. **Start here.** |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | Production-grade target architecture — an upgrade path from the starter toward the **14 CFR contest corpus**, organized against the evaluation rubric (retrieval, generation, memory, data pipeline, cost/latency, safety, validation). Forward-looking; tags every recommendation **KEEP / ADD / REPLACE**. |
+| [`embedding-model.md`](embedding-model.md) | Decision note: the embedder choice (**`voyage-4-large`**), the pluggable **Gemini** backend (Vertex AI / ADC on trial credit), and why a premium embedder is justified for 14 CFR. |
 | [`../frontend/README.md`](../frontend/README.md) | Frontend (React + Vite) chat UI — features and setup. |
 
-## Target corpus pivot
+## Target corpus
 
-The starter ships an **Apollo** sample corpus (21 `.md`, English Wikipedia). The **contest grades on all of 14 CFR** (FAA aviation regulations — English legal/regulatory text, ~50k–150k chunks). That pivot drives the current design decisions:
+The contest grades on **all of 14 CFR** (FAA aviation regulations — English
+legal/regulatory text). The repo ingests Title 14 directly from the eCFR
+versioner API into ~10,744 structure-aware, citation-tagged chunks (the §
+section is the retrieval + citation unit). That pivot — away from the original
+Apollo/Wikipedia sample corpus — drives the design:
 
-- **Embedder:** `voyage-4-large` (Anthropic-recommended Voyage AI), not `bge-m3` — see [`embedding-model.md`](embedding-model.md). Language is no longer a constraint and a paid API is acceptable.
-- **Search:** brute-force cosine is dead at Title-14 scale → real ANN (pgvector HNSW / Qdrant) + a `§`-number router + BM25 hybrid.
-- **Citations:** CFR's canonical `14 CFR § …` references are externally verifiable — a direct win for the Citations rubric.
+- **Embedder:** a premium dense model (`voyage-4-large`, or Gemini
+  `gemini-embedding-001`) rather than a small local one — language is no longer a
+  constraint and a paid/credit API is acceptable. See [`embedding-model.md`](embedding-model.md).
+- **Retrieval:** dense cosine alone is not enough for legal text → **hybrid**
+  (dense ⊕ BM25 via RRF) plus a **CFR §/Part router** for exact-citation queries.
+- **Citations:** CFR's canonical `14 CFR § …` references are externally
+  verifiable — a direct win for the Citations rubric.
 
-## Current state vs. this design
+## Current state (implemented)
 
-The code in `indexer.py` / `backend/app.py` / `frontend/` is the **working starter**: single-stage dense retrieval (fixed `k=5`), one Sonnet call, single-turn, Apollo corpus. [`ARCHITECTURE.md`](ARCHITECTURE.md) is the **forward-looking design** — every recommendation is tagged **KEEP / ADD / REPLACE**, so it doubles as a roadmap. Nothing in it is implemented yet unless the code says otherwise.
+The working system is end-to-end over 14 CFR:
 
-## Known immediate fixes (surfaced by the architecture review)
+- **Ingest** — `cfr_ingest.py`: eCFR XML → `data/corpus.jsonl`, §-level cited chunks.
+- **Embed/index** — `indexer.py`: pluggable Voyage/Gemini embedder → `index.pkl`.
+- **Retrieve** — `indexer.search()`: hybrid dense + BM25 (RRF) + §/Part router;
+  `HYBRID=0` falls back to pure dense, `RERANK=1` adds an optional Voyage reranker.
+- **Generate** — `backend/app.py`: a **relevance gate** abstains (no LLM call)
+  when the best dense-cosine match is below a calibrated threshold; otherwise
+  Claude answers from a numbered context block with `[n]` citations mapped to
+  their `14 CFR §` source.
 
-These are small, real, and independent of the larger design:
+[`ARCHITECTURE.md`](ARCHITECTURE.md) remains the **forward-looking roadmap** —
+real ANN (pgvector/Qdrant) at scale, a cross-encoder rerank by default, a golden
+eval set, memory, and cost/latency work are still ahead. Treat its KEEP / ADD /
+REPLACE tags as the to-do list beyond what the code already does.
 
-- **Ingest 14 CFR.** The contest corpus is not in `documents/` as indexable text yet — pull the FAA Title 14 source (prefer eCFR bulk XML over PDF for clean Part/§ structure) and reindex.
-- **`index.pkl` is stale** — built with the old 1000/100 chunker, *before* the current 1500/200 `chunk_text`. It is also Apollo-only. Rebuild after the corpus + embedder swap.
-- **`documents/06-changelog.md`** is a non-corpus file that still gets indexed and can pollute answers/citations — add it to an ingest denylist.
-- **`search()` discards distances** — return `(score, record)` so a relevance gate / abstain path becomes possible.
-- **Embedder swap** — replace `sentence-transformers` with the `voyageai` client; remember `input_type="document"` at index and `input_type="query"` at search (Voyage embeddings stay unit-normalized, so the `1 − dot` cosine math is unchanged).
+## Resolved (was: "known immediate fixes")
+
+These were surfaced by the architecture review and are now done:
+
+- ✅ **Ingest 14 CFR** — `cfr_ingest.py` pulls eCFR bulk XML (clean Part/§ structure) and builds `data/corpus.jsonl`.
+- ✅ **Rebuild the index** — `index.pkl` is regenerated by `indexer.py` from the current corpus (the stale Apollo index is gone; `index.pkl`/`data/` are gitignored).
+- ✅ **Embedder swap** — `sentence-transformers` replaced by a pluggable Voyage/Gemini client with `input_type`/`task_type` document-vs-query handling.
+- ✅ **`search()` exposes scores** — each hit carries `dense_score` (cosine), enabling the relevance gate / abstain path.
+- ✅ **Non-corpus files** — the old `documents/` sample (incl. `06-changelog.md`) is no longer the corpus; ingestion is scoped to eCFR Title 14.

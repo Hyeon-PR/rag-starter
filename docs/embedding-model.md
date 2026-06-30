@@ -1,6 +1,6 @@
 # Decision note — embedding model
 
-**Status:** proposed · **Date:** 2026-07-01 · **Scope:** retrieval bi-encoder choice
+**Status:** implemented (pluggable backend) · **Date:** 2026-07-01 · **Scope:** retrieval bi-encoder choice
 **Decision:** Use **`voyage-4-large`** as the dense embedder for the contest's **14 CFR** corpus, decided by a head-to-head bake-off against the legal-domain **`voyage-law-2`** (with the open-weight **`voyage-4-nano`** as the free local baseline / fallback). Keep extra precision in a cross-encoder **reranker** and a lexical **BM25** channel — the embedder is one stage, not the whole answer.
 
 > **This supersedes the earlier `bge-m3` recommendation.** That call was made for the Apollo Wikipedia starter corpus *and* a multilingual (Korean-query) requirement. Both premises changed: the contest grades on **14 CFR** (English legal/regulatory text), **language no longer matters** (optimize for raw retrieval performance), and a **paid embedding API is acceptable**. When the premises change, the decision changes.
@@ -42,6 +42,33 @@ The Cost rubric counts **LLM context tokens**, not embedding tokens. Embedding a
 - **Latency** — +network round-trip per query (~100–300 ms) vs ~30–60 ms local. Fine for UX.
 - **Reproducibility** — a hosted model can shift; pin the model string and snapshot the index. `voyage-4-nano` is pinnable if that matters.
 - **Lose the native sparse channel** — `bge-m3` emitted dense + sparse from one model; Voyage is dense-only, so **add BM25 separately** (the design wanted hybrid anyway). Voyage swaps only the dense bi-encoder; the hybrid + rerank scaffolding stands.
+
+## The pluggable Gemini backend (Vertex AI / ADC)
+
+`indexer.py` ships a **selectable embedder** (`EMBED_BACKEND=voyage|gemini`) so you can bake off providers with no code change. The alternative is Google's **`gemini-embedding-001`**:
+
+| | Voyage | Gemini |
+|---|---|---|
+| Model | `voyage-4-large` | `gemini-embedding-001` |
+| Dims | 1024 default (Matryoshka 256/512/2048) | 3072 default; **Matryoshka** truncation (repo uses 1536) |
+| Query vs doc | `input_type="document"`/`"query"` | `task_type=RETRIEVAL_DOCUMENT`/`RETRIEVAL_QUERY` |
+| Auth | `VOYAGE_API_KEY` | `GEMINI_API_KEY` **or** Vertex AI via ADC |
+
+Two reasons to reach for Gemini here:
+
+1. **Trial credit.** Running it through **Vertex AI with Application Default Credentials** (`GOOGLE_GENAI_USE_VERTEXAI=true` + `GOOGLE_CLOUD_PROJECT`, then `gcloud auth application-default login`) draws on a Google Cloud trial credit — no API key, and the one-time index build costs effectively nothing.
+2. **A real second contender** for the bake-off the decision above calls for.
+
+**Gemini gotcha — normalization.** At its native 3072 dims Gemini returns unit-normalized vectors, but **truncated Matryoshka dims (e.g. 1536) arrive _un_-normalized**. `embed()` unit-normalizes every vector defensively, which both fixes this and preserves the `cosine == dot-product` shortcut `search()` relies on. (Voyage vectors are already normalized, so the same code is a no-op for them.)
+
+## What's implemented vs still ahead
+
+The embedder is one stage. The repo now also ships the lexical + routing stages the decision anticipated:
+
+- ✅ **BM25 hybrid** — dense ⊕ BM25 fused with Reciprocal Rank Fusion in `search()`.
+- ✅ **CFR §/Part router** — exact-citation queries ("what does 91.3 say") pin the named section.
+- ✅ **Optional reranker** — a Voyage cross-encoder rerank behind `RERANK=1`.
+- ⏳ **The bake-off itself** — pick Voyage vs Gemini (vs `voyage-law-2`) on a 14 CFR golden set; not yet run. See [`ARCHITECTURE.md`](ARCHITECTURE.md) Phase 4.
 
 ## Migration gotchas (small, but easy to get wrong)
 

@@ -1,118 +1,128 @@
-# Context Management Project — RAG over a document corpus
+# 14 CFR RAG — retrieval-augmented Q&A over FAA aviation regulations
 
-A starter that extends the Foundations chat with retrieval-augmented generation. You'll implement the indexing pipeline and wire retrieval + citations into the chat backend.
+A retrieval-augmented chat system over **Title 14 of the U.S. Code of Federal
+Regulations** (FAA aviation regulations). Ask a question in plain language or by
+section number; the system retrieves the relevant CFR chunks, answers **strictly
+from them**, and cites the exact `14 CFR §` sources — or **abstains** when the
+corpus doesn't cover the question.
 
-## What's in here
+Built for the 14 CFR contest. The design rationale and forward roadmap live in
+[`docs/`](docs/).
+
+## Pipeline
+
+```
+eCFR XML  ─►  cfr_ingest.py  ─►  data/corpus.jsonl  ─►  indexer.py  ─►  index.pkl  ─►  backend/app.py  ─►  frontend/
+ (source)     structure-aware     §-level, cited         embed +         dense+BM25      Flask chat:        React chat
+              chunking            chunks (~10.7k)         persist         hybrid index    gate→cite→answer    + Sources
+```
+
+1. **Ingest** — `cfr_ingest.py` pulls Title 14 from the eCFR versioner API and
+   parses the regulation XML into structure-aware, citation-tagged chunks. The
+   **§ (section) is the retrieval + citation unit**: short sections are kept
+   whole, long ones split with overlap; appendices/SFARs are handled too.
+   Stdlib only (no third-party parser). → `data/corpus.jsonl` (~10,744 chunks).
+2. **Index** — `indexer.py` embeds each chunk with a **selectable backend**
+   (Voyage AI or Gemini) and persists `index.pkl`.
+3. **Retrieve** — `indexer.search()` is **hybrid**: dense cosine ⊕ BM25 fused by
+   Reciprocal Rank Fusion, plus a **CFR §/Part router** that pins exact-citation
+   queries ("what does 91.3 say") to the right section.
+4. **Generate** — `backend/app.py` runs a **relevance gate**: if nothing
+   retrieved clears the calibrated cosine bar it abstains up front (no LLM call,
+   no chance to hallucinate). Otherwise Claude answers from a numbered context
+   block and **every claim is cited `[n]`**, mapped back to its `14 CFR §` source
+   for the frontend.
+
+## Layout
 
 ```
 rag-starter/
-├── documents/                  20 real Wikipedia articles (Apollo missions)
-├── indexer.py                  walk docs → chunk → embed → store
+├── cfr_ingest.py            eCFR XML → structure-aware, cited §-chunks  → data/corpus.jsonl
+├── indexer.py               embed (Voyage|Gemini) + hybrid search       → index.pkl
 ├── backend/
-│   ├── app.py                  extended chat with RAG stubs
+│   ├── app.py               Flask chat: retrieve → gate → cite → answer
 │   └── requirements.txt
-├── frontend/                   React UI (Foundations chat + Sources display)
+├── frontend/                React + Vite chat UI (citations + Sources)
+├── docs/                    architecture, embedding-model decision, doc index
 └── .env.example
 ```
-
-**The corpus** is 20 Wikipedia articles (plain-text extracts):
-
-- 15 Apollo missions: 1, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17
-- 5 related: Apollo program (overview), Saturn V, Lunar Module, Command/Service Module, Mission Control Center
-
-Total ~850 KB of text across the 20 files. After chunking (~1000 chars each) you'll have several hundred chunks. Real enough that some questions answer crisply and others surface the seams.
-
-## Documentation
-
-Design and decision docs live in [`docs/`](docs/):
-
-- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — production-grade target architecture (an upgrade path from this starter, mapped to the evaluation rubric).
-- **[docs/embedding-model.md](docs/embedding-model.md)** — why the design uses `bge-m3` rather than a larger embedding model.
-- **[docs/README.md](docs/README.md)** — full documentation index + known immediate fixes.
 
 ## Setup
 
 ```bash
-# from this directory
-python3.11 -m venv .venv
-source .venv/bin/activate
+# from the repo root — use a Linux/WSL Python (the .venv here is a Windows venv)
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r backend/requirements.txt
 
-cp .env.example .env
-# set ANTHROPIC_API_KEY
+cp .env.example .env         # then edit .env (see below)
 ```
 
-The first time you run anything that imports `sentence-transformers`, it will download the embedding model (multilingual, ~470 MB). One-time only.
+`.env` needs `ANTHROPIC_API_KEY` (for generation) and one embedding backend:
 
-## Your job
+| `EMBED_BACKEND` | Credentials | Notes |
+|---|---|---|
+| `voyage` (default) | `VOYAGE_API_KEY` | `voyage-4-large`, 1024-d. |
+| `gemini` | `GEMINI_API_KEY` **or** Vertex AI via ADC | `gemini-embedding-001`, 1536-d. ADC (`gcloud auth application-default login`) uses a Google Cloud trial credit — no API key. |
 
-### 1. Implement chunking and build the index
+See [`docs/embedding-model.md`](docs/embedding-model.md) for the why and the
+Vertex/ADC setup.
 
-Open `indexer.py`. There's a `TODO` for `chunk_text()`. Implement it (see the Context Management lecture slide for one working version). Then:
+## Build the corpus + index
 
 ```bash
-python indexer.py
-# Indexing documents from documents/
-#   01-overview.md: 3 chunks
-#   02-streaks.md: 4 chunks
-#   ...
-# ✓ Indexed N chunks → index.pkl
+python cfr_ingest.py         # eCFR XML → data/corpus.jsonl   (~10.7k chunks)
+python indexer.py            # embed   → index.pkl
 ```
 
-### 2. Wire retrieval into the chat backend
+`cfr_ingest.py` flags: `--parts 1 73 91` (only these Parts), `--limit N` (first
+N Parts), `--date YYYY-MM-DD` (eCFR issue date; default latest), `--refresh`
+(re-fetch even if cached). Fetched Part XML is cached under `data/`, so re-runs
+are cheap.
 
-Open `backend/app.py`. There are `TODO`s for:
-
-- Updating `SYSTEM_PROMPT` with citation rules
-- Calling `search(user_message, INDEX, k=5)` to get top chunks
-- Formatting them as a numbered context block
-- Building `user_content` with `CONTEXT:` + `QUESTION:`
-
-The citation parser is already wired — it returns the source filenames the model cited, which the frontend already displays under each answer.
-
-### 3. Run it
+## Run
 
 ```bash
 # Terminal 1 — backend
-cd backend
-python app.py
+cd backend && python app.py          # http://localhost:5000
 
 # Terminal 2 — frontend
-cd frontend
-npm install
-npm run dev
+cd frontend && npm install && npm run dev   # http://localhost:5173
 ```
 
-Open <http://localhost:5173>. Ask questions about the Apollo program. You should see:
-- An answer that draws on the indexed docs
-- A `Sources:` line citing which files were used
+Open <http://localhost:5173>.
 
-**Try these (graded easy → hard):**
+**Try these:**
 
-- *"What was the cause of the Apollo 1 fire?"* — single-doc, factual.
-- *"Which Apollo missions landed on the Moon?"* — cross-cutting, enumeration.
-- *"Compare the moonwalk durations of Apollo 11 and Apollo 17."* — cross-doc, comparison.
-- *"List Apollo missions that used the Saturn V rocket."* — cross-doc, requires reasoning over the corpus.
-- *"What is the Artemis program?"* — **out-of-corpus**; the system should say it doesn't know rather than hallucinate.
+- *"What does 14 CFR 91.3 say about the authority of the pilot in command?"* —
+  the §-router pins **§ 91.3** to the top.
+- *"What are the requirements to be issued a private pilot certificate?"* —
+  semantic, spans several sections of Part 61.
+- *"What's a good recipe for chocolate-chip cookies?"* — **out-of-corpus**; the
+  system abstains instead of guessing.
 
-### 4. Report
+## Retrieval knobs (env)
 
-Pick **5 test questions** that probe the corpus from different angles. For each:
-- The question
-- The answer the system gave
-- Whether the cited sources are correct (open the file, verify)
-- A judgment: did the system answer well, weakly, or hallucinate?
+| Var | Default | Effect |
+|---|---|---|
+| `EMBED_BACKEND` / `EMBED_MODEL` / `EMBED_DIM` | `voyage` / model default / backend default | embedding backend + dims |
+| `RETRIEVAL_K` | `5` | chunks retrieved per query |
+| `RETRIEVAL_MIN_SCORE` | `0.66` | abstain threshold (best dense cosine); recalibrate per backend |
+| `HYBRID` | `1` | `0` → pure dense (no BM25 / router) |
+| `RRF_K` / `SECTION_BONUS` / `PART_BONUS` | `60` / `0.5` / `0.003` | fusion + §/Part router tuning |
+| `RERANK` | off | `1` → Voyage cross-encoder rerank of the fused pool (needs `VOYAGE_API_KEY`) |
 
-Then write up **2 strengths and 2 weaknesses** of your implementation with the worked examples as evidence.
+## Notes
 
-## What to present
+- `.env` holds secrets and is gitignored. `index.pkl` and `data/` are
+  regenerable artifacts (also gitignored) — rebuild them with the commands above.
+- The abstain threshold is calibrated to the embedding backend. The shipped
+  `0.66` was set on the Gemini index (in-domain top scores ~0.73–0.80,
+  out-of-domain ~0.49–0.61); re-measure if you switch backends or dims.
 
-- Your chunking choice (size, overlap, boundary rule) and why
-- Your system prompt's citation rules
-- One question that works cleanly, with the right citations
-- One question that fails — wrong answer, missing citation, or hallucinated source
-- What you would change (chunking? retrieval? prompt?) to fix the failure
+## Docs
 
-## Alternative project
-
-Want to RAG over your own corpus (your notes, a docs site you've cloned, a code repo's READMEs)? Replace the contents of `documents/` and re-run `python indexer.py`. The rest of the pipeline works unchanged.
+- [`docs/README.md`](docs/README.md) — documentation index + status.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — target architecture / roadmap,
+  mapped to the evaluation rubric (KEEP / ADD / REPLACE).
+- [`docs/embedding-model.md`](docs/embedding-model.md) — embedding-model decision
+  note (Voyage vs Gemini, Vertex/ADC).
