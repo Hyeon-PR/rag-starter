@@ -29,6 +29,7 @@ Outputs:
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import re
@@ -54,7 +55,10 @@ TARGET_CHARS = 2000
 OVERLAP_CHARS = 200
 
 # Section sub-elements that are source/editorial noise, not regulatory text.
-SKIP_TAGS = {"CITA", "SECAUTH", "EDNOTE", "EFFDNOT", "SOURCE", "AUTH", "FTNT", "EAR"}
+# NOTE: FTNT (footnotes) is intentionally NOT here — CFR footnotes routinely
+# carry substantive content (worked examples, defined terms, qualifying
+# conditions), so they flow into the body like ordinary paragraphs.
+SKIP_TAGS = {"CITA", "SECAUTH", "EDNOTE", "EFFDNOT", "SOURCE", "AUTH", "EAR"}
 
 
 # ── HTTP ────────────────────────────────────────────────────────────────────
@@ -72,6 +76,14 @@ def http_get(url: str, tries: int = 6) -> bytes:
         except urllib.error.HTTPError as e:
             last = e
             if e.code in (429, 500, 502, 503, 504) and attempt < tries - 1:
+                time.sleep(min(30, 3 * (attempt + 1)))
+                continue
+            raise
+        except (http.client.IncompleteRead, TimeoutError, ConnectionError) as e:
+            # Read-phase failures (mid-body drop, read timeout) aren't URLError
+            # subclasses, so without this arm they'd skip the retry loop entirely.
+            last = e
+            if attempt < tries - 1:
                 time.sleep(min(30, 3 * (attempt + 1)))
                 continue
             raise
@@ -131,6 +143,8 @@ def _el_text(el: ET.Element) -> str:
     if el.tag.lower() == "img":
         name = (el.get("src") or "").rsplit("/", 1)[-1]
         return f"[figure: {name}]" if name else "[figure]"
+    if el.tag.lower() == "br":
+        return " "  # else tokens on either side of a line break would merge
     out = [el.text or ""]
     for child in el:
         out.append(_el_text(child))
@@ -152,7 +166,11 @@ def _section_citation(part: str, sec: str, heading: str) -> str:
     "Table A to Part 117" — so we never fabricate a "§" for those.
     """
     h = heading.lstrip()
-    if h.startswith("§"):
+    # Only use the "§ N" form when N actually encodes the Part (e.g. "61.3" -> Part
+    # 61). A few Parts have a stray "§" in the heading on numbers like "19-8.3"
+    # that don't encode the Part — those fall through to the Part-qualified form so
+    # siblings ("19-8.1") stay consistent.
+    if h.startswith("§") and (sec == part or sec.startswith(part + ".")):
         return f"14 CFR § {sec}"
     m = re.match(r"(Sec\.|Section)\s+[\w.\-]+", h)
     if m:
@@ -161,6 +179,26 @@ def _section_citation(part: str, sec: str, heading: str) -> str:
     if m:
         return f"14 CFR {m.group(0)}"
     return f"14 CFR Part {part}, {sec}"
+
+
+def _clean_appendix_label(label: str, heading: str) -> str:
+    """Normalize a DIV9 appendix label. eCFR occasionally ships a corrupted,
+    duplicated N — seen in Part 380: 'Appendix Appendix A to Part 380' and
+    'Appendix B to Part 380Appendix B to Part 380' — which would otherwise become
+    non-resolvable citations."""
+    label = label.strip()
+    # Exact full duplication: "X…XX…X" -> "X…".
+    n = len(label)
+    if n and n % 2 == 0 and label[: n // 2] == label[n // 2:]:
+        label = label[: n // 2].strip()
+    # Leading duplicated word: "Appendix Appendix A …" -> "Appendix A …".
+    label = re.sub(r"^(Appendix|Table)\s+\1\b", r"\1", label)
+    # If still malformed but the HEAD is already a clean canonical label, prefer it.
+    canon = re.compile(r"^(?:Appendix|Table)\b.*\bto\s+(?:Sub)?[Pp]art\s+\d+", re.I)
+    head_ref = heading.split("—", 1)[0].strip() if heading else ""
+    if not canon.match(label) and canon.match(head_ref):
+        label = head_ref
+    return label
 
 
 def _strip_amendments(div8: ET.Element) -> None:
@@ -237,11 +275,13 @@ def iter_sections(part_xml: bytes):
                 "body": body,
             }
         elif el.tag == "DIV9" and el.get("TYPE") == "APPENDIX":
-            # N is already a canonical label, e.g. "Appendix A to Part 91" or
-            # "Special Federal Aviation Regulation No. 50-2". Appendices belong
-            # to the Part, not a subpart.
-            label = (el.get("N") or "").strip()
-            heading = _head(el) or label
+            # N is usually a canonical label, e.g. "Appendix A to Part 91" or
+            # "Special Federal Aviation Regulation No. 50-2". Appendices belong to
+            # the Part, not a subpart. A few Parts (e.g. 380) ship a corrupted
+            # duplicated N, so normalize it before it becomes a citation.
+            heading = _head(el)
+            label = _clean_appendix_label((el.get("N") or "").strip(), heading)
+            heading = heading or label
             title = heading.split("—", 1)[1].strip() if "—" in heading else heading
             body = _section_body(el)
             if not body:
@@ -331,7 +371,11 @@ def fetch_part(date: str, part: str, refresh: bool) -> bytes:
     if cached.exists() and not refresh:
         return cached.read_bytes()
     data = http_get(f"{API}/full/{date}/title-{TITLE}.xml?part={part}")
-    cached.write_bytes(data)
+    # Write atomically so an interrupted run can't leave a truncated cache file
+    # that would be silently reused (and fail to parse) on every later run.
+    tmp = cached.with_suffix(".xml.tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, cached)
     return data
 
 
@@ -356,7 +400,10 @@ def build(parts: list[str], date: str, refresh: bool) -> int:
             try:
                 units = list(iter_sections(xml))
             except Exception as e:  # malformed XML / unexpected structure
-                print(f"  ! Part {part}: parse failed ({e}) — skipped", file=sys.stderr)
+                # A parse failure usually means a corrupted/truncated cache file;
+                # drop it so a re-run refetches instead of failing forever.
+                print(f"  ! Part {part}: parse failed ({e}) — cache dropped, re-run to refetch", file=sys.stderr)
+                (CACHE_DIR / f"part-{part}.xml").unlink(missing_ok=True)
                 skipped.append(part)
                 continue
             # Buffer the whole Part before writing, so a failure can't leave a
