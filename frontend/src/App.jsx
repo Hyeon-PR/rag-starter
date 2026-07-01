@@ -108,6 +108,11 @@ function Sources({ sources, openN, setOpenN, focus }) {
           <span className="passage-head">
             [{open.n}] {open.cfr_citation || open.source}
           </span>
+          {open.quote && (
+            <p className="passage-quote">
+              <mark title="Verified supporting quote from this source">{`“${open.quote}”`}</mark>
+            </p>
+          )}
           {open.text}
         </blockquote>
       )}
@@ -211,6 +216,13 @@ function AssistantMessage({ m }) {
   const verify = verifyCitations(m.text, sources)
   // Backend-neutralized [?] markers have no number but still count as unresolved.
   const badCount = verify.invalid.length + (verify.unresolved || 0)
+  // "verified" only when the backend checked each [n] against a verbatim quote
+  // from the cited passage (#11); otherwise the check is mere resolution.
+  const verified = m.meta?.citations_verified
+  const nCite = verify.valid.length
+  const okText = verified
+    ? `✓ ${nCite} citation${nCite === 1 ? '' : 's'} verified against the cited passage`
+    : `✓ ${nCite} citation${nCite === 1 ? '' : 's'} resolve${nCite === 1 ? 's' : ''} to a retrieved source`
   return (
     <div className="row assistant">
       <div className="avatar" aria-hidden="true">A</div>
@@ -228,9 +240,7 @@ function AssistantMessage({ m }) {
         {verify.total > 0 && (
           <div className={`verify ${badCount ? 'warn' : 'ok'}`}>
             {badCount === 0
-              ? `✓ ${verify.valid.length} citation${verify.valid.length === 1 ? '' : 's'} resolve${
-                  verify.valid.length === 1 ? 's' : ''
-                } to a retrieved source`
+              ? okText
               : `⚠ ${badCount} unverified reference${badCount === 1 ? '' : 's'}${
                   verify.invalid.length
                     ? ` (${verify.invalid.map((n) => `[${n}]`).join(', ')})`

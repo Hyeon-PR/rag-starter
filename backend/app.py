@@ -9,6 +9,7 @@ TODO:
   4. Build the user_content with CONTEXT + QUESTION.
   5. Parse citation numbers from the answer; return them to the frontend.
 """
+import json
 import logging
 import os
 import re
@@ -68,7 +69,14 @@ numbers shown in the context. Place the citation immediately after the claim it 
 - If only part of the question is supported, answer that part and clearly state what the \
 sources do not cover.
 - Lead with the direct answer and keep it concise: no preamble, no restating the question, \
-and no closing summary. Be as brief as the question allows while still citing every claim with [n]."""
+and no closing summary. Be as brief as the question allows while still citing every claim with [n].
+
+After the answer, append a machine-readable support block in EXACTLY this form, with nothing after it:
+<<<CITATIONS>>>
+{"1": "<span copied verbatim from source [1]>", "2": "<span copied verbatim from source [2]>"}
+Include one entry for every [n] you cited. Each value must be copied EXACTLY, character-for-character, \
+from that numbered source and must support the claim you cited it for — do not paraphrase, summarize, or \
+invent it. This block is stripped out before your answer is shown to the user."""
 
 
 # Relevance gate. Calibrated on the Gemini index (in-domain top scores ~0.73–0.79,
@@ -85,6 +93,12 @@ CHAT_MODEL = os.environ.get("CHAT_MODEL", "claude-sonnet-4-6")
 # (folded into retrieval_ms as latency only), so this is the LLM inference cost.
 COST_PER_INPUT_TOKEN = float(os.environ.get("COST_PER_INPUT_TOKEN", "3e-6"))
 COST_PER_OUTPUT_TOKEN = float(os.environ.get("COST_PER_OUTPUT_TOKEN", "15e-6"))
+# Grounding verification: the model appends a per-[n] verbatim quote block; a
+# citation is kept only if its quote is a substring of the cited source. A quote
+# shorter than this (after whitespace/case normalization) is treated as no real
+# support, so a trivial 1-word "quote" can't pass the check. Env-tunable.
+CITATION_BLOCK_MARKER = "<<<CITATIONS>>>"
+MIN_QUOTE_CHARS = int(os.environ.get("MIN_QUOTE_CHARS", "12"))
 ABSTAIN_REPLY = (
     "The provided 14 CFR sources don't contain anything relevant to that question, "
     "so I can't answer it from the corpus."
@@ -142,7 +156,11 @@ def chat():
         messages=[{"role": "user", "content": user_content}],
     )
     llm_ms = (time.perf_counter() - t_llm) * 1000
-    answer = resp.content[0].text
+    # The model appends a machine-readable support block (see SYSTEM_PROMPT); split
+    # it off so `answer` is the display text and `quotes` maps each cited [n] to the
+    # verbatim span the model claims supports it. `quote_block` is False when no
+    # parseable block was emitted — verification then degrades to in-range-only.
+    answer, quotes, quote_block = _split_citation_block(resp.content[0].text)
 
     # Token usage + latency (total = retrieval, incl. embedding round-trip, + LLM).
     usage = resp.usage
@@ -159,14 +177,27 @@ def chat():
     )
 
     # ────────────────────────────────────────────────────────────
-    # TODO — citation extraction
+    # Citation extraction + grounding verification
     #
-    # Parse [n] markers from the answer. Drop invented ones.
-    # For each valid citation, return its source filename and chunk index
-    # so the frontend can display them.
+    # A marker [n] is kept only if it is in range AND (when the model emitted a
+    # support block) the quote it gave for [n] is a verbatim substring of source
+    # [n]. Kept markers carry their verified quote; every dropped marker is
+    # neutralized to [?] in the returned reply. This is the deterministic
+    # supporting-quote hard gate — NLI/entailment soft-gating is still roadmap
+    # (see docs/ARCHITECTURE.md §1.2).
     # ────────────────────────────────────────────────────────────
+    used = [int(x) for x in re.findall(r"\[(\d+)\]", answer)]
+    in_range = {n for n in used if 1 <= n <= len(hits)}
+    if quote_block:
+        supported = {n for n in in_range if _quote_supported(quotes.get(n, ""), hits[n - 1]["text"])}
+    else:
+        supported = in_range  # no quotes to check against — keep the in-range guard only
 
-    citations = _build_citations(answer, hits)
+    citations = _build_citations(answer, hits, supported, quotes)
+    invalid = sorted(n for n in used if not (1 <= n <= len(hits)))   # out-of-range / invented
+    unsupported = sorted(n for n in in_range if n not in supported)  # quote failed the substring check
+    bad = set(invalid) | set(unsupported)
+
     meta = {
         # Echo the exact question this answer was produced for. A downstream
         # eval/grader can assert row["question"] == meta["question"] to catch a
@@ -180,6 +211,10 @@ def chat():
         "retrieval_ms": round(retrieval_ms),
         "llm_ms": round(llm_ms),
         "total_ms": round(total_ms),
+        # True when each kept [n] was checked against a verbatim quote from the
+        # cited passage (not merely resolved to a retrieved chunk) — lets the UI
+        # say "verified against the cited passage" honestly.
+        "citations_verified": quote_block,
     }
     # Prompt caching is off today (single-turn, sub-floor system prompt), so these
     # are 0; read them defensively so cost_usd stays honest if caching is enabled.
@@ -187,14 +222,13 @@ def chat():
     if cache_read:
         meta["cached_input_tokens"] = cache_read
 
-    # Log exactly which retrieved chunks the answer cited (with a text snippet),
-    # and flag any [n] the model emitted that has no matching source. This is the
-    # crux of debugging whether an answer is grounded in the right reference.
-    used = [int(x) for x in re.findall(r"\[(\d+)\]", answer)]
-    valid_ns = {c["n"] for c in citations}
-    invalid = sorted({x for x in used if x not in valid_ns})
+    # Trace which chunks the answer cited and which markers were dropped, so a
+    # wrong answer can be traced to what retrieval + verification actually kept.
     if citations:
-        log.info("answer cited %d of %d retrieved chunks:", len(citations), len(hits))
+        log.info(
+            "answer cited %d of %d retrieved chunks (verified=%s):",
+            len(citations), len(hits), quote_block,
+        )
         for c in citations:
             h = hits[c["n"] - 1]
             snippet = " ".join(h.get("text", "").split())[:140]
@@ -205,24 +239,28 @@ def chat():
                 h.get("source"), h.get("chunk_index"), snippet,
             )
     else:
-        # A non-abstained answer with no resolvable citation is ungrounded: the
-        # relevance gate let it through on retrieval score, but the model cited
-        # nothing. Surface it (grounded=False, and a UI notice) instead of
-        # silently returning it as if it were a normal cited answer. A hard
-        # re-ask/abstain needs the entailment pass (roadmap); this is the flag.
-        log.warning("non-abstained answer carries no citations — ungrounded")
-    # Neutralize any out-of-range/invented [n] in the returned answer so a
-    # consumer of `reply` that doesn't run the frontend verifier can't mistake it
-    # for a real, resolvable citation. Valid markers are untouched; invalid ones
-    # become a literal [?], which the frontend renders as a flagged badge.
-    safe_answer = answer
+        # A non-abstained answer with no kept citation is ungrounded: the gate let
+        # it through on retrieval score, but nothing the model cited survived
+        # verification. Surface it (grounded=False, UI notice) rather than
+        # returning it as if it were a normal cited answer.
+        log.warning("non-abstained answer carries no verified citations — ungrounded")
     if invalid:
+        log.warning("answer used out-of-range citation(s): %s (neutralized to [?])", invalid)
+    if unsupported:
         log.warning(
-            "answer used citation(s) with no matching source: %s (neutralized to [?])", invalid
+            "answer citation(s) failed the supporting-quote check: %s (neutralized to [?])",
+            unsupported,
         )
+
+    # Neutralize every dropped [n] (out-of-range or unsupported) in the returned
+    # answer so a consumer of `reply` can't mistake it for a real, grounded
+    # citation. Kept markers are left untouched; dropped ones become a literal
+    # [?], which the frontend renders as a flagged badge.
+    safe_answer = answer
+    if bad:
         safe_answer = re.sub(
             r"\[(\d+)\]",
-            lambda m: m.group(0) if int(m.group(1)) in valid_ns else "[?]",
+            lambda m: m.group(0) if int(m.group(1)) in supported else "[?]",
             answer,
         )
 
@@ -231,21 +269,67 @@ def chat():
         "citations": citations,
         "grounded": bool(citations),
         "invalid_citations": invalid,
+        "unsupported_citations": unsupported,
         "meta": meta,
     })
 
 
-def _build_citations(answer: str, hits: list[dict]) -> list[dict]:
-    """Return one citation entry per unique valid [n] used in the answer.
+def _normalize(s: str) -> str:
+    """Collapse whitespace and lowercase — a reflow-robust key for substring tests."""
+    return " ".join((s or "").split()).lower()
 
-    Starter implementation: extract the numbers, drop out-of-range, return
-    the matching hit's filename + chunk_index. Improve as you like.
+
+def _quote_supported(quote: str, passage: str) -> bool:
+    """True iff `quote` (normalized) is a non-trivial substring of `passage`.
+
+    The length floor stops a one-word "quote" from trivially matching a long
+    passage and passing the grounding check with no real support.
+    """
+    q = _normalize(quote)
+    return len(q) >= MIN_QUOTE_CHARS and q in _normalize(passage)
+
+
+def _split_citation_block(raw: str) -> "tuple[str, dict[int, str], bool]":
+    """Split model output into (display_answer, {n: quote}, block_present).
+
+    The model appends, after the answer:
+        <<<CITATIONS>>>
+        {"1": "verbatim quote", ...}
+    Returns the answer with that block stripped, the parsed marker→quote map, and
+    whether a parseable block was found. On a missing/garbled block we return the
+    text as-is with an empty map, so verification degrades to in-range-only rather
+    than dropping every citation on a formatting slip.
+    """
+    idx = raw.rfind(CITATION_BLOCK_MARKER)
+    if idx == -1:
+        return raw.strip(), {}, False
+    answer = raw[:idx].rstrip()
+    tail = raw[idx + len(CITATION_BLOCK_MARKER):].strip()
+    if tail.startswith("```"):  # tolerate a ```json … ``` fence
+        tail = tail.strip("`").strip()
+        if tail[:4].lower() == "json":
+            tail = tail[4:].strip()
+    try:
+        obj = json.loads(tail)
+        quotes = {int(k): str(v) for k, v in obj.items()}
+    except (ValueError, TypeError, AttributeError):
+        log.warning("citation support block present but unparseable — skipping quote verification")
+        return answer, {}, False
+    return answer, quotes, True
+
+
+def _build_citations(answer: str, hits: list[dict], allowed: set, quotes: dict) -> list[dict]:
+    """Return one citation entry per unique kept [n], in first-use order.
+
+    `allowed` is the set of markers that passed the range + supporting-quote
+    checks; `quotes` maps a marker to the verbatim span the model cited for it
+    (attached per entry so the UI can show/highlight the exact support).
     """
     used = [int(n) for n in re.findall(r"\[(\d+)\]", answer)]
     seen: set[int] = set()
     citations: list[dict] = []
     for n in used:
-        if n in seen or n < 1 or n > len(hits):
+        if n in seen or n not in allowed:
             continue
         seen.add(n)
         h = hits[n - 1]
@@ -260,6 +344,9 @@ def _build_citations(answer: str, hits: list[dict]) -> list[dict]:
             "section": h.get("section"),
             "part": h.get("part"),
             "text": h.get("text", ""),
+            # The verbatim span the model quoted as support for this marker,
+            # already verified to be a substring of `text` (None if unverified).
+            "quote": quotes.get(n),
         })
     return citations
 
