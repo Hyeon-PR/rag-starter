@@ -10,6 +10,27 @@ This is an incremental upgrade path from the *actual* repo toward the contest ta
 
 ---
 
+## Implementation status (updated 2026-07-02)
+
+The rest of this doc is a **roadmap** written against the *starter*. This section is the reality check — what the running code does **today** — so the KEEP / ADD / REPLACE tags below read correctly.
+
+**Shipped**
+- Structure-aware §-level chunking with a `14 CFR §` citation + title prefix (`cfr_ingest.py`).
+- Pluggable dense embedder — but the **runtime backend is Gemini** (`gemini-embedding-001`, 1536-d), *not* the `voyage-4-large` this doc leans toward; the abstain gate is calibrated on the Gemini cosine distribution.
+- Hybrid retrieval: dense ⊕ BM25 via RRF + a §/Part router, force-including the corpus-best cosine chunk (`indexer.py`). The cross-encoder reranker exists but is **off by default**.
+- Score-gated **abstain** (no LLM call below the cosine bar) — the 0-token refusal path.
+- System prompt as a grounding + citation contract, **plus a lead-with-answer / concise clause**.
+- **Citation grounding — the deterministic supporting-quote gate is now implemented** (§1.2): every `[n]` must carry a verbatim quote that is a substring of the cited passage, or it is dropped and neutralized to `[?]`. Canonical `§` citations, in-app passage + verified-quote display, `grounded` / `citations_verified` flags, and a per-answer `cost_usd` are surfaced to the UI.
+
+**Still roadmap (not built)**
+- **Conversational memory / condense** (§1.3) and the multi-turn `{session_id}` request — the app is still single-turn / stateless.
+- **NLI / entailment** soft-gating and the leave-one-out citation-*precision* prune — only the deterministic substring hard-gate ships.
+- **Query transformation** (HyDE / multi-query), rerank-on-by-default, and small-to-big parent/child chunking.
+- A real **ANN** store (pgvector / Qdrant) — retrieval is still the in-process pickle + numpy scan.
+- **SSE streaming**, **tier-routing** to Haiku, the layered **guardrails** (§3.2), and the CI **eval harness / golden set** (§4).
+
+---
+
 ## Rubric Optimization Matrix
 
 Assumed weights (state explicitly; re-prioritize if the grader's split differs):
@@ -75,7 +96,7 @@ Assumed weights (state explicitly; re-prioritize if the grader's split differs):
 5. **Anti-filler** *(Clarity)* — lead with the answer; no preamble, no restating the question, no closing summary.
 6. **Instruction hierarchy** *(Safety)* — text inside CONTEXT is untrusted **data**, never instructions.
 
-**Verifiable grounding — REPLACE the in-range regex** (`_build_citations` only checks `1≤n≤len(hits)`, so a hallucinated-but-in-range citation passes). Hard gate = **deterministic substring** (the `supporting_quote` must be a substring of `passage[n]`) → fail = drop the marker. Soft gate = **Haiku sentence-level entailment**. One **grader-triggered** corrective pass on Opus (never pre-routed), re-grade once, then strip still-failing markers — no further loop. Honest claim: *deterministically-bounded, reduced* ungrounded citations, not "zero hallucination." **Decoding:** `temperature=0` on Haiku/Sonnet; Opus 4.8 has no temperature knob (returns 400) — determinism there comes from the strict schema + `effort:low`.
+**Verifiable grounding — the in-range regex is REPLACED (✅ shipped).** `_build_citations` no longer trusts range alone. The model emits a `supporting_quote` per `[n]`, and the **deterministic substring** hard gate (the quote must be a substring of `passage[n]`, whitespace/case-normalized, with a min length so a one-word "quote" can't trivially pass) drops any marker that fails and neutralizes it to `[?]` in the reply — so a hallucinated-but-in-range citation no longer passes. Kept markers carry the verified quote (shown in the UI passage expand), and `meta.citations_verified` lets the banner say "verified against the cited passage." **Still ahead:** the soft gate = **Haiku sentence-level entailment**. One **grader-triggered** corrective pass on Opus (never pre-routed), re-grade once, then strip still-failing markers — no further loop. Honest claim: *deterministically-bounded, reduced* ungrounded citations, not "zero hallucination." **Decoding:** `temperature=0` on Haiku/Sonnet; Opus 4.8 has no temperature knob (returns 400) — determinism there comes from the strict schema + `effort:low`.
 
 ### 1.3 Conversational Memory & Multi-Turn Coherence
 

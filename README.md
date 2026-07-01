@@ -150,15 +150,19 @@ INFO rag.chat:   [1] 14 CFR 91.3 src=part-91.xml chunk=0 :: The pilot in command
 | Field | Type | Notes |
 |---|---|---|
 | `reply` | string | The grounded answer. Answers **lead with the direct answer and stay concise**; every claim is cited `[n]`, and any invalid/invented marker is neutralized to `[?]`. |
-| `citations` | array | One entry per resolvable `[n]`: `{ n, source, cfr_citation, section, part, url, text, chunk_index }`. |
-| `grounded` | bool | `false` when a non-abstained answer cited no source (ungrounded) — the UI shows a "No sources cited" notice. |
-| `invalid_citations` | array | Numbers the model emitted with no matching source (neutralized to `[?]` in `reply`). |
+| `citations` | array | One entry per **kept (verified)** `[n]`: `{ n, source, cfr_citation, section, part, text, chunk_index, quote }` — `quote` is the verbatim supporting span. |
+| `grounded` | bool | `false` when a non-abstained answer kept no citation (ungrounded) — the UI shows a "No sources cited" notice. |
+| `invalid_citations` | array | Out-of-range / invented numbers the model emitted (neutralized to `[?]` in `reply`). |
+| `unsupported_citations` | array | In-range `[n]` whose supporting quote failed the substring check (also neutralized to `[?]`). |
 | `abstained` | bool | Present and `true` when the relevance gate refused before any LLM call (no tokens billed). |
-| `meta` | object | `input_tokens`, `output_tokens`, `cost_usd` (LLM inference $, from `COST_PER_*_TOKEN`), `retrieval_ms`, `llm_ms`, `total_ms`, `model`, `question`. |
+| `meta` | object | `input_tokens`, `output_tokens`, `cost_usd` (LLM inference $, from `COST_PER_*_TOKEN`), `citations_verified`, `retrieval_ms`, `llm_ms`, `total_ms`, `model`, `question`. |
 
-The UI verifies each `[n]` **resolves to a retrieved source** (resolution, not
-entailment — it does not check that the passage supports the claim) and flags any
-unresolved marker.
+**Grounding check:** the model appends a verbatim `supporting_quote` per `[n]`,
+and the backend keeps a citation only if that quote is a **substring of the cited
+passage** (deterministic; not full NLI entailment). Markers that fail are dropped
+and neutralized to `[?]`. When quotes were checked the UI banner reads "verified
+against the cited passage"; if the model emitted no quote block it falls back to
+resolution-only.
 
 ## Notes
 
