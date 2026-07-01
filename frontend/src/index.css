@@ -510,6 +510,22 @@ button.source-pill.toggle.open {
   font-size: 0.72rem;
   color: var(--muted);
 }
+/* The verified supporting quote, highlighted above the full retrieved passage.
+   Reset the default <p> margins and style the <mark> with the theme's citation
+   colours so it doesn't fall back to the browser's fluorescent-yellow default. */
+.passage-quote {
+  margin: 0 0 6px;
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+.passage-quote mark {
+  background: var(--cite-bg);
+  color: var(--cite-ink);
+  padding: 1px 4px;
+  border-radius: 4px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
 
 .error-actions {
   margin-top: 8px;
