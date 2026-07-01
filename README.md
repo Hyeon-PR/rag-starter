@@ -105,7 +105,7 @@ Open <http://localhost:5173>.
 | Var | Default | Effect |
 |---|---|---|
 | `EMBED_BACKEND` / `EMBED_MODEL` / `EMBED_DIM` | `voyage` / model default / backend default | embedding backend + dims |
-| `RETRIEVAL_K` | `5` | chunks retrieved per query |
+| `RETRIEVAL_K` | `8` | chunks retrieved per query |
 | `RETRIEVAL_MIN_SCORE` | `0.66` | abstain threshold (best dense cosine); recalibrate per backend |
 | `HYBRID` | `1` | `0` → pure dense (no BM25 / router) |
 | `RRF_K` / `SECTION_BONUS` / `PART_BONUS` | `60` / `0.5` / `0.003` | fusion + §/Part router tuning |
@@ -126,22 +126,39 @@ essential for judging whether it's grounded in the right section:
 - **which chunks the answer actually cited** — each `[n]` mapped to its
   `cfr_citation` / `source` / `chunk_index` with a text snippet, plus a warning
   for any `[n]` the model emitted with no matching source;
-- **cost + latency** — the model's `input` / `output` token counts and per-stage
-  latency (`retrieval`, which includes the query-embedding round-trip; `llm`; and
-  `total`).
+- **cost + latency** — the model's `input` / `output` token counts, the estimated
+  `cost` in USD (LLM inference), and per-stage latency (`retrieval`, which includes
+  the query-embedding round-trip; `llm`; and `total`).
 
 Each request is **single-turn / stateless** — only the current question plus the
 retrieved context is sent to the model (no prior conversation), so `input` tokens
 ≈ system prompt + context + question.
 
 ```
-INFO rag.chat: gate top_dense=0.731 >= 0.66 -> ANSWER (5 chunks in context)
-INFO rag.retrieval: retrieval q='what does 91.3 say...' | backend=gemini mode=hybrid(dense+bm25+router) rerank=off router[sections=['91.3'] parts=[91]] | 5 of 10744 chunks
+INFO rag.chat: gate top_dense=0.731 >= 0.66 -> ANSWER (8 chunks in context)
+INFO rag.retrieval: retrieval q='what does 91.3 say...' | backend=gemini mode=hybrid(dense+bm25+router) rerank=off router[sections=['91.3'] parts=[91]] | 8 of 10744 chunks
 INFO rag.retrieval:   #1 14 CFR 91.3    score=0.53 dense=0.73 bm25=1.36 [ROUTER:section]  src=part-91.xml chunk=0
-INFO rag.chat: llm model=claude-sonnet-4-6 in=812 out=143 | latency retrieval=118ms llm=1274ms total=1392ms
-INFO rag.chat: answer cited 1 of 5 retrieved chunks:
+INFO rag.chat: llm model=claude-sonnet-4-6 in=2103 out=148 cost=$0.0085 | latency retrieval=118ms llm=1274ms total=1392ms
+INFO rag.chat: answer cited 1 of 8 retrieved chunks:
 INFO rag.chat:   [1] 14 CFR 91.3 src=part-91.xml chunk=0 :: The pilot in command is directly responsible for, and is the final authority...
 ```
+
+## API
+
+`POST /api/chat` — body `{ "message": "<question>" }`. Response:
+
+| Field | Type | Notes |
+|---|---|---|
+| `reply` | string | The grounded answer. Answers **lead with the direct answer and stay concise**; every claim is cited `[n]`, and any invalid/invented marker is neutralized to `[?]`. |
+| `citations` | array | One entry per resolvable `[n]`: `{ n, source, cfr_citation, section, part, url, text, chunk_index }`. |
+| `grounded` | bool | `false` when a non-abstained answer cited no source (ungrounded) — the UI shows a "No sources cited" notice. |
+| `invalid_citations` | array | Numbers the model emitted with no matching source (neutralized to `[?]` in `reply`). |
+| `abstained` | bool | Present and `true` when the relevance gate refused before any LLM call (no tokens billed). |
+| `meta` | object | `input_tokens`, `output_tokens`, `cost_usd` (LLM inference $, from `COST_PER_*_TOKEN`), `retrieval_ms`, `llm_ms`, `total_ms`, `model`, `question`. |
+
+The UI verifies each `[n]` **resolves to a retrieved source** (resolution, not
+entailment — it does not check that the passage supports the claim) and flags any
+unresolved marker.
 
 ## Notes
 
