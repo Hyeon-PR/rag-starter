@@ -303,12 +303,17 @@ body {
   border-radius: 6px;
   margin: 0 1px;
   vertical-align: super;
-  cursor: help;
+  cursor: pointer; /* clicking jumps to the source in the Sources list */
+}
+.cite:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 /* A [n] marker with no matching source — flagged, never passed off as real. */
 .cite.invalid {
   background: var(--error-bg);
   color: var(--error-ink);
+  cursor: help; /* not navigable — nothing to jump to */
 }
 
 /* Inline citation with a hover/focus preview of its retrieved passage. The
@@ -455,6 +460,21 @@ button.source-pill.toggle.open {
 .source-pill .caret {
   opacity: 0.6;
 }
+/* Jump feedback: when an inline [n] chip is clicked, its Sources pill scrolls
+   into view and flashes a ring (outline, so no layout shift or colour fight). */
+.source-pill.pulse {
+  outline: 2px solid transparent;
+  outline-offset: 2px;
+  animation: source-pulse 1.1s ease-out;
+}
+@keyframes source-pulse {
+  from {
+    outline-color: var(--accent);
+  }
+  to {
+    outline-color: transparent;
+  }
+}
 /* The exact retrieved passage, shown in-app on expand. flex-basis:100% breaks
    it onto its own row inside the wrapping .sources flex container. */
 .passage {
@@ -471,6 +491,17 @@ button.source-pill.toggle.open {
   overflow-wrap: anywhere;
   max-height: 260px;
   overflow-y: auto;
+  animation: passage-in 0.18s ease-out;
+}
+@keyframes passage-in {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 .passage-head {
   display: block;

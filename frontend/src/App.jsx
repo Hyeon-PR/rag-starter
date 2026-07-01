@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { Markdown, verifyCitations } from './markdown.jsx'
 
@@ -46,22 +46,43 @@ function Metrics({ meta }) {
 
 // Sources under an answer. Each cited chunk shows its CFR text reference
 // (e.g. "14 CFR § 91.3"); clicking a source expands the exact retrieved passage
-// in-app so the user can verify the claim without leaving the page.
-function Sources({ sources }) {
-  const [openN, setOpenN] = useState(null)
+// in-app so the user can verify the claim without leaving the page. Open state
+// is owned by the parent so an inline [n] chip can drive it (`focus`): when the
+// user clicks a chip, we scroll its pill into view and pulse it.
+function Sources({ sources, openN, setOpenN, focus }) {
+  const pillRefs = useRef(new Map())
+  const [pulseN, setPulseN] = useState(null)
+
+  useEffect(() => {
+    if (!focus) return
+    const el = pillRefs.current.get(focus.n)
+    el?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+    setPulseN(focus.n)
+    const t = setTimeout(() => setPulseN(null), 1100)
+    return () => clearTimeout(t)
+    // `focus` carries a bumped tick, so repeat clicks on the same chip re-fire.
+  }, [focus])
+
   if (!sources.length) return null
   const open = sources.find((c) => c.n === openN) || null
+  const setRef = (n) => (el) => {
+    if (el) pillRefs.current.set(n, el)
+    else pillRefs.current.delete(n)
+  }
   return (
     <div className="sources">
       <span className="sources-label">Sources</span>
       {sources.map((c) => {
         const isOpen = openN === c.n
         const label = c.cfr_citation || c.source
-        // With no retrieved text there is nothing to expand — render a plain,
-        // non-interactive text reference.
+        const cls = `source-pill${c.text ? ' toggle' : ''}${isOpen ? ' open' : ''}${
+          pulseN === c.n ? ' pulse' : ''
+        }`
+        // With no retrieved text there is nothing to expand — render a plain
+        // text reference (still a jump target for its inline chip).
         if (!c.text) {
           return (
-            <span key={c.n} className="source-pill" title={`chunk ${c.chunk_index}`}>
+            <span key={c.n} ref={setRef(c.n)} className={cls} title={`chunk ${c.chunk_index}`}>
               [{c.n}] {label}
             </span>
           )
@@ -69,8 +90,9 @@ function Sources({ sources }) {
         return (
           <button
             key={c.n}
+            ref={setRef(c.n)}
             type="button"
-            className={`source-pill toggle${isOpen ? ' open' : ''}`}
+            className={cls}
             aria-expanded={isOpen}
             onClick={() => setOpenN(isOpen ? null : c.n)}
             title="Show the exact retrieved passage"
@@ -80,8 +102,9 @@ function Sources({ sources }) {
           </button>
         )
       })}
-      {open && (
-        <blockquote className="passage">
+      {open && open.text && (
+        // Keyed by n so switching sources remounts it and replays the entrance.
+        <blockquote key={open.n} className="passage">
           <span className="passage-head">
             [{open.n}] {open.cfr_citation || open.source}
           </span>
@@ -166,7 +189,21 @@ function Message({ m, onRetry, sending }) {
     )
   }
 
-  // assistant
+  return <AssistantMessage m={m} />
+}
+
+// An assistant answer plus its sources. Holds the open-source state so a click
+// on an inline [n] chip (via onCite) and a click on a Sources pill drive the
+// same expansion — clicking a chip also scrolls to and pulses its pill.
+function AssistantMessage({ m }) {
+  const [openN, setOpenN] = useState(null)
+  const [focus, setFocus] = useState(null)
+  // Stable (empty deps) so the memoized <Markdown> doesn't re-parse on open.
+  const onCite = useCallback((n) => {
+    setOpenN(n)
+    setFocus((f) => ({ n, tick: (f?.tick || 0) + 1 }))
+  }, [])
+
   const sources = m.citations || []
   // Verify the [n] markers in the final answer against the sources the backend
   // actually returned, so the UI can vouch for what it renders (and flag any
@@ -180,9 +217,9 @@ function Message({ m, onRetry, sending }) {
       <div className="bubble">
         <div className="answer">
           {/* Pass m.citations (stable ref) not `sources` (fresh []) so memo holds. */}
-          <Markdown text={m.text} citations={m.citations} />
+          <Markdown text={m.text} citations={m.citations} onCite={onCite} />
         </div>
-        <Sources sources={sources} />
+        <Sources sources={sources} openN={openN} setOpenN={setOpenN} focus={focus} />
         {/* A non-abstained answer that cited nothing is ungrounded — say so
             plainly rather than rendering it as a normal, source-backed answer. */}
         {sources.length === 0 && !m.abstained && (

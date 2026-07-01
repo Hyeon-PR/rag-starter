@@ -86,38 +86,52 @@ function renderInline(text, ctx, keyPrefix) {
     } else if (m[4] !== undefined) {
       const n = Number(m[4])
       const c = ctx.byNum.get(n)
-      if (c && c.text) {
-        // Perplexity-style peek: hovering or keyboard-focusing the chip reveals
-        // a small card with the CFR ref + a snippet of the exact retrieved
-        // passage, so a claim can be spot-checked without scrolling down to
-        // Sources. The full, unclipped passage still lives in the Sources pills.
+      if (c) {
+        // A resolved citation. Clicking (or Enter/Space on) the chip jumps to
+        // and opens its Sources card — the in-app replacement for the old eCFR
+        // deep link. If it also carries retrieved text, hovering/focusing shows
+        // a Perplexity-style peek card with the exact passage.
         const ref = c.cfr_citation || c.source
-        const popId = `${key}-pop`
-        nodes.push(
-          <span key={key} className="cite-wrap">
-            <sup className="cite" tabIndex={0} aria-describedby={popId} aria-label={`Citation ${n}: ${ref}`}>
-              {n}
-            </sup>
-            <span role="tooltip" id={popId} className="cite-pop">
-              <span className="cite-pop-head">
-                [{n}] {ref}
+        const activate = ctx.onCite ? () => ctx.onCite(n) : null
+        const chipProps = {
+          className: 'cite',
+          tabIndex: 0,
+          role: activate ? 'button' : undefined,
+          onClick: activate || undefined,
+          onKeyDown: activate
+            ? (e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault()
+                  activate()
+                }
+              }
+            : undefined,
+          'aria-label': `Citation ${n}: ${ref}${activate ? ' — jump to source' : ''}`,
+        }
+        if (c.text) {
+          const popId = `${key}-pop`
+          nodes.push(
+            <span key={key} className="cite-wrap">
+              <sup {...chipProps} aria-describedby={popId}>
+                {n}
+              </sup>
+              <span role="tooltip" id={popId} className="cite-pop">
+                <span className="cite-pop-head">
+                  [{n}] {ref}
+                </span>
+                <span className="cite-pop-body">{snippet(c.text, 240)}</span>
               </span>
-              <span className="cite-pop-body">{snippet(c.text, 240)}</span>
-            </span>
-          </span>,
-        )
-      } else if (c) {
-        // Resolved citation with no retrieved text — plain badge, nothing to peek.
-        nodes.push(
-          <sup
-            key={key}
-            className="cite"
-            aria-label={`Citation ${n}: ${c.source}, chunk ${c.chunk_index}`}
-            title={`${c.source} · chunk ${c.chunk_index}`}
-          >
-            {n}
-          </sup>,
-        )
+            </span>,
+          )
+        } else {
+          // Resolved citation with no retrieved text — no peek card, but still
+          // navigable to its Sources entry.
+          nodes.push(
+            <sup key={key} {...chipProps}>
+              {n}
+            </sup>,
+          )
+        }
       } else {
         // Unverifiable reference: keep it visible but visibly flagged so it is
         // never mistaken for a real, checkable source.
@@ -240,8 +254,10 @@ function parseBlocks(text) {
 // Memoized so a full App re-render (e.g. on every keystroke in the composer)
 // doesn't re-parse the markdown of every prior answer. Effective only if the
 // `citations` prop is a stable reference — App passes `m.citations` directly.
-export const Markdown = memo(function Markdown({ text, citations }) {
-  const ctx = { byNum: new Map((citations || []).map((c) => [c.n, c])) }
+export const Markdown = memo(function Markdown({ text, citations, onCite }) {
+  // onCite(n) lets a clicked inline chip drive the Sources list (scroll to +
+  // open source n). It must be a stable ref or the memo below won't hold.
+  const ctx = { byNum: new Map((citations || []).map((c) => [c.n, c])), onCite }
   const rendered = parseBlocks(text || '').map((b, bi) => {
     const key = `b${bi}`
     switch (b.type) {
