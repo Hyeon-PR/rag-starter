@@ -191,6 +191,11 @@ function Message({ m, onRetry, sending }) {
           <Markdown text={m.text} citations={m.citations} />
         </div>
         <Sources sources={sources} />
+        {/* A non-abstained answer that cited nothing is ungrounded — say so
+            plainly rather than rendering it as a normal, source-backed answer. */}
+        {sources.length === 0 && !m.abstained && (
+          <div className="verify">No sources cited for this answer.</div>
+        )}
         {verify.total > 0 && (
           <div className={`verify ${verify.invalid.length ? 'warn' : 'ok'}`}>
             {verify.invalid.length === 0
@@ -328,6 +333,9 @@ export default function App() {
           role: 'assistant',
           text: reply,
           citations: Array.isArray(data.citations) ? data.citations : [],
+          // The gate's out-of-scope refusal (abstained) legitimately carries no
+          // citations; a normal answer with none is ungrounded — distinguish them.
+          abstained: data.abstained === true,
           meta: data.meta || null,
         },
       ])

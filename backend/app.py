@@ -189,11 +189,21 @@ def chat():
                 h.get("source"), h.get("chunk_index"), snippet,
             )
     else:
-        log.info("answer cited no sources")
+        # A non-abstained answer with no resolvable citation is ungrounded: the
+        # relevance gate let it through on retrieval score, but the model cited
+        # nothing. Surface it (grounded=False, and a UI notice) instead of
+        # silently returning it as if it were a normal cited answer. A hard
+        # re-ask/abstain needs the entailment pass (roadmap); this is the flag.
+        log.warning("non-abstained answer carries no citations — ungrounded")
     if invalid:
         log.warning("answer used citation(s) with no matching source: %s", invalid)
 
-    return jsonify({"reply": answer, "citations": citations, "meta": meta})
+    return jsonify({
+        "reply": answer,
+        "citations": citations,
+        "grounded": bool(citations),
+        "meta": meta,
+    })
 
 
 def _ecfr_url(hit: dict) -> str:
