@@ -105,7 +105,12 @@ def chat():
             "gate top_dense=%.3f < %.2f -> ABSTAIN (no LLM call) | retrieval=%.0fms in=0 out=0",
             top_dense, MIN_TOP_SCORE, retrieval_ms,
         )
-        return jsonify({"reply": ABSTAIN_REPLY, "citations": [], "abstained": True})
+        return jsonify({
+            "reply": ABSTAIN_REPLY,
+            "citations": [],
+            "abstained": True,
+            "meta": {"retrieval_ms": round(retrieval_ms), "total_ms": round(retrieval_ms)},
+        })
     log.info(
         "gate top_dense=%.3f >= %.2f -> ANSWER (%d chunks in context)",
         top_dense, MIN_TOP_SCORE, len(hits),
@@ -130,10 +135,11 @@ def chat():
 
     # Token usage + latency (total = retrieval, incl. embedding round-trip, + LLM).
     usage = resp.usage
+    total_ms = (time.perf_counter() - t_start) * 1000
     log.info(
         "llm model=%s in=%d out=%d | latency retrieval=%.0fms llm=%.0fms total=%.0fms",
         CHAT_MODEL, usage.input_tokens, usage.output_tokens,
-        retrieval_ms, llm_ms, (time.perf_counter() - t_start) * 1000,
+        retrieval_ms, llm_ms, total_ms,
     )
 
     # ────────────────────────────────────────────────────────────
@@ -145,6 +151,14 @@ def chat():
     # ────────────────────────────────────────────────────────────
 
     citations = _build_citations(answer, hits)
+    meta = {
+        "model": CHAT_MODEL,
+        "input_tokens": usage.input_tokens,
+        "output_tokens": usage.output_tokens,
+        "retrieval_ms": round(retrieval_ms),
+        "llm_ms": round(llm_ms),
+        "total_ms": round(total_ms),
+    }
 
     # Log exactly which retrieved chunks the answer cited (with a text snippet),
     # and flag any [n] the model emitted that has no matching source. This is the
@@ -168,7 +182,7 @@ def chat():
     if invalid:
         log.warning("answer used citation(s) with no matching source: %s", invalid)
 
-    return jsonify({"reply": answer, "citations": citations})
+    return jsonify({"reply": answer, "citations": citations, "meta": meta})
 
 
 def _build_citations(answer: str, hits: list[dict]) -> list[dict]:

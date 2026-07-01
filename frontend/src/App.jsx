@@ -17,6 +17,32 @@ const EXAMPLES = [
 // Anthropic + retrieval can take a while; give it room but don't hang forever.
 const REQUEST_TIMEOUT_MS = 90_000
 
+function fmtMs(ms) {
+  if (ms == null) return null
+  return ms >= 1000 ? `${(ms / 1000).toFixed(2)}s` : `${Math.round(ms)}ms`
+}
+
+// Per-answer cost + latency, from the backend's `meta`. Tokens are absent on the
+// abstain path (no LLM call), so guard on each field.
+function Metrics({ meta }) {
+  const head = []
+  if (meta.input_tokens != null) head.push(`${meta.input_tokens} in`)
+  if (meta.output_tokens != null) head.push(`${meta.output_tokens} out`)
+  if (meta.total_ms != null) head.push(`${fmtMs(meta.total_ms)} total`)
+  if (head.length === 0) return null
+
+  const detail = []
+  if (meta.retrieval_ms != null) detail.push(`retrieval ${fmtMs(meta.retrieval_ms)}`)
+  if (meta.llm_ms != null) detail.push(`llm ${fmtMs(meta.llm_ms)}`)
+
+  return (
+    <div className="metrics" title={meta.model ? `model: ${meta.model}` : undefined}>
+      {head.join(' · ')}
+      {detail.length > 0 && <span className="metrics-detail"> ({detail.join(' · ')})</span>}
+    </div>
+  )
+}
+
 function Message({ m, onRetry, sending }) {
   if (m.role === 'user') {
     return (
@@ -78,6 +104,7 @@ function Message({ m, onRetry, sending }) {
                 } (${verify.invalid.map((n) => `[${n}]`).join(', ')}) — no matching source`}
           </div>
         )}
+        {m.meta && <Metrics meta={m.meta} />}
       </div>
     </div>
   )
@@ -177,6 +204,7 @@ export default function App() {
           role: 'assistant',
           text: reply,
           citations: Array.isArray(data.citations) ? data.citations : [],
+          meta: data.meta || null,
         },
       ])
     } catch (err) {
