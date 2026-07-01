@@ -66,7 +66,9 @@ numbers shown in the context. Place the citation immediately after the claim it 
 - If the context does not contain enough information to answer, say so explicitly \
 (e.g. "The provided sources don't contain an answer to that.") and do not fabricate one.
 - If only part of the question is supported, answer that part and clearly state what the \
-sources do not cover."""
+sources do not cover.
+- Lead with the direct answer and keep it concise: no preamble, no restating the question, \
+and no closing summary. Be as brief as the question allows while still citing every claim with [n]."""
 
 
 # Relevance gate. Calibrated on the Gemini index (in-domain top scores ~0.73–0.79,
