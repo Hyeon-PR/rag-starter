@@ -109,7 +109,11 @@ def chat():
             "reply": ABSTAIN_REPLY,
             "citations": [],
             "abstained": True,
-            "meta": {"retrieval_ms": round(retrieval_ms), "total_ms": round(retrieval_ms)},
+            "meta": {
+                "question": user_message,
+                "retrieval_ms": round(retrieval_ms),
+                "total_ms": round(retrieval_ms),
+            },
         })
     log.info(
         "gate top_dense=%.3f >= %.2f -> ANSWER (%d chunks in context)",
@@ -152,6 +156,11 @@ def chat():
 
     citations = _build_citations(answer, hits)
     meta = {
+        # Echo the exact question this answer was produced for. A downstream
+        # eval/grader can assert row["question"] == meta["question"] to catch a
+        # mis-zip (the question column drifting out of sync with the answer it's
+        # graded against) instead of silently scoring the wrong pair.
+        "question": user_message,
         "model": CHAT_MODEL,
         "input_tokens": usage.input_tokens,
         "output_tokens": usage.output_tokens,
