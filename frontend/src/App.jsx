@@ -28,6 +28,7 @@ function Metrics({ meta }) {
   const head = []
   if (meta.input_tokens != null) head.push(`${meta.input_tokens} in`)
   if (meta.output_tokens != null) head.push(`${meta.output_tokens} out`)
+  if (meta.cost_usd != null) head.push(`$${meta.cost_usd.toFixed(4)}`)
   if (meta.total_ms != null) head.push(`${fmtMs(meta.total_ms)} total`)
   if (head.length === 0) return null
 
@@ -63,11 +64,11 @@ function Sources({ sources }) {
               rel="noopener noreferrer"
               title={`Open ${c.cfr_citation || c.source} on eCFR`}
             >
-              [{c.n}] {c.source} <span aria-hidden="true">↗</span>
+              [{c.n}] {c.cfr_citation || c.source} <span aria-hidden="true">↗</span>
             </a>
           ) : (
             <span className="source-pill" title={`chunk ${c.chunk_index}`}>
-              [{c.n}] {c.source}
+              [{c.n}] {c.cfr_citation || c.source}
             </span>
           )}
           {c.text && (

@@ -80,6 +80,11 @@ and no closing summary. Be as brief as the question allows while still citing ev
 TOP_K = int(os.environ.get("RETRIEVAL_K", "8"))
 MIN_TOP_SCORE = float(os.environ.get("RETRIEVAL_MIN_SCORE", "0.66"))
 CHAT_MODEL = os.environ.get("CHAT_MODEL", "claude-sonnet-4-6")
+# Rough $/answer estimate surfaced in meta. Sonnet 4.6 list price is $3 / $15 per
+# MTok (input / output); override per model via env. Embedding cost is separate
+# (folded into retrieval_ms as latency only), so this is the LLM inference cost.
+COST_PER_INPUT_TOKEN = float(os.environ.get("COST_PER_INPUT_TOKEN", "3e-6"))
+COST_PER_OUTPUT_TOKEN = float(os.environ.get("COST_PER_OUTPUT_TOKEN", "15e-6"))
 ABSTAIN_REPLY = (
     "The provided 14 CFR sources don't contain anything relevant to that question, "
     "so I can't answer it from the corpus."
@@ -142,9 +147,14 @@ def chat():
     # Token usage + latency (total = retrieval, incl. embedding round-trip, + LLM).
     usage = resp.usage
     total_ms = (time.perf_counter() - t_start) * 1000
+    cost_usd = round(
+        usage.input_tokens * COST_PER_INPUT_TOKEN
+        + usage.output_tokens * COST_PER_OUTPUT_TOKEN,
+        6,
+    )
     log.info(
-        "llm model=%s in=%d out=%d | latency retrieval=%.0fms llm=%.0fms total=%.0fms",
-        CHAT_MODEL, usage.input_tokens, usage.output_tokens,
+        "llm model=%s in=%d out=%d cost=$%.4f | latency retrieval=%.0fms llm=%.0fms total=%.0fms",
+        CHAT_MODEL, usage.input_tokens, usage.output_tokens, cost_usd,
         retrieval_ms, llm_ms, total_ms,
     )
 
@@ -166,10 +176,16 @@ def chat():
         "model": CHAT_MODEL,
         "input_tokens": usage.input_tokens,
         "output_tokens": usage.output_tokens,
+        "cost_usd": cost_usd,
         "retrieval_ms": round(retrieval_ms),
         "llm_ms": round(llm_ms),
         "total_ms": round(total_ms),
     }
+    # Prompt caching is off today (single-turn, sub-floor system prompt), so these
+    # are 0; read them defensively so cost_usd stays honest if caching is enabled.
+    cache_read = getattr(usage, "cache_read_input_tokens", 0) or 0
+    if cache_read:
+        meta["cached_input_tokens"] = cache_read
 
     # Log exactly which retrieved chunks the answer cited (with a text snippet),
     # and flag any [n] the model emitted that has no matching source. This is the
