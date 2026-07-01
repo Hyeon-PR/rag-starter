@@ -11,6 +11,7 @@ Usage:
     python test_api_extended.py --url http://host:port # custom base URL
     python test_api_extended.py --verbose              # show full reply text
     python test_api_extended.py --list                 # list cases without calling the API
+    python test_api_extended.py --stream               # drive the SSE streaming endpoint
 """
 import argparse
 import json
@@ -261,6 +262,46 @@ def post_chat(question: str, base_url: str, timeout: int = 90) -> dict:
         return json.loads(resp.read().decode())
 
 
+def post_chat_stream(question: str, base_url: str, timeout: int = 90,
+                     on_delta=None) -> dict:
+    """Hit the SSE streaming endpoint and return the final `done` payload dict.
+
+    Same response shape as post_chat — the streamed `delta` events are reassembled
+    here (and forwarded to on_delta for live display), then the `done` event
+    carries the authoritative reply/citations/meta. Raises on an `error` event or
+    if the stream ends without a `done`. Signature matches post_chat so run_suite
+    can swap between them.
+    """
+    url = f"{base_url}/api/chat"
+    payload = json.dumps({"message": question}).encode()
+    req = urllib.request.Request(
+        url, data=payload,
+        # Asking for the event stream is what flips the backend into streaming mode.
+        headers={"Content-Type": "application/json", "Accept": "text/event-stream"},
+        method="POST",
+    )
+    done = None
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        # Each event is a single `data: {json}` line followed by a blank line, so
+        # iterating lines (they arrive as produced) is enough — no frame buffering.
+        for raw_line in resp:
+            line = raw_line.decode("utf-8").strip()
+            if not line.startswith("data:"):
+                continue
+            evt = json.loads(line[5:].strip())
+            etype = evt.get("type")
+            if etype == "delta":
+                if on_delta:
+                    on_delta(evt.get("text", ""))
+            elif etype == "done":
+                done = evt
+            elif etype == "error":
+                raise RuntimeError(evt.get("message", "stream error"))
+    if done is None:
+        raise RuntimeError("stream ended before a done event")
+    return done
+
+
 # ── result evaluation ─────────────────────────────────────────────────────────
 
 @dataclass
@@ -358,7 +399,11 @@ def print_result(r: Result, verbose: bool = False) -> None:
 SECTION_ORDER = ["part61", "part67", "part71", "part71_91", "part73", "part91", "out_of_scope"]
 
 
-def run_suite(base_url: str, section_filter: Optional[str], verbose: bool) -> None:
+def run_suite(base_url: str, section_filter: Optional[str], verbose: bool,
+              stream: bool = False) -> None:
+    # Exercise the SSE streaming endpoint when asked; post_chat_stream returns the
+    # same payload shape, so the rest of the suite is identical.
+    fetch = post_chat_stream if stream else post_chat
     cases = CASES if not section_filter else [c for c in CASES if c.section == section_filter]
     if not cases:
         print(red(f"No cases found for section '{section_filter}'."))
@@ -387,7 +432,7 @@ def run_suite(base_url: str, section_filter: Optional[str], verbose: bool) -> No
             print(bold(f"  Q:{note} {case.question}"))
             try:
                 t0 = time.perf_counter()
-                data = post_chat(case.question, base_url)
+                data = fetch(case.question, base_url)
                 elapsed = time.perf_counter() - t0
             except urllib.error.URLError as e:
                 print(red(f"  Connection error: {e.reason}"))
@@ -460,6 +505,8 @@ def main() -> None:
                         help="Print full reply text instead of a 200-char snippet")
     parser.add_argument("--list", action="store_true",
                         help="List all test cases and exit without calling the API")
+    parser.add_argument("--stream", action="store_true",
+                        help="Exercise the SSE streaming endpoint (Accept: text/event-stream)")
     args = parser.parse_args()
 
     if args.list:
@@ -476,7 +523,7 @@ def main() -> None:
         print(f"\nTotal: {len(CASES)} cases across {len(sections)} sections")
         return
 
-    run_suite(args.url, args.section, args.verbose)
+    run_suite(args.url, args.section, args.verbose, stream=args.stream)
 
 
 if __name__ == "__main__":

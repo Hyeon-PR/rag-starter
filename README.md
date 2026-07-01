@@ -164,6 +164,22 @@ and neutralized to `[?]`. When quotes were checked the UI banner reads "verified
 against the cited passage"; if the model emitted no quote block it falls back to
 resolution-only.
 
+**Streaming (SSE).** Send `Accept: text/event-stream` (the web UI does) and the
+answer streams token-by-token as [Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events);
+without that header the endpoint returns the single JSON body above. Each event is
+a `data: {json}` line:
+
+| Event | Shape | Notes |
+|---|---|---|
+| `delta` | `{ "type": "delta", "text": "…" }` | Incremental answer text. The trailing `<<<CITATIONS>>>` block is stripped, so deltas carry only display text. This text is **provisional** — a `[n]` may still be neutralized to `[?]` once verified. |
+| `done` | `{ "type": "done", …payload }` | Terminal event carrying the **authoritative** payload — the same fields as the JSON body above (`reply`, `citations`, `grounded`, `meta`, …). Clients settle on `reply` here. |
+| `error` | `{ "type": "error", "message": "…" }` | A failure after the `200` was committed (the HTTP status can no longer change), e.g. the model call raised mid-stream. |
+
+Verification and `[?]` neutralization need the *complete* answer, so they run once
+streaming finishes and their result rides the `done` event — clients replace the
+streamed text with `done.reply`. `python test_api_extended.py --stream` runs the
+suite over the SSE path from the CLI.
+
 ## Notes
 
 - `.env` holds secrets and is gitignored. `index.pkl` and `data/` are

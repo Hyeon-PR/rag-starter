@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from anthropic import Anthropic
 from dotenv import load_dotenv
-from flask import Flask, jsonify, request
+from flask import Flask, Response, jsonify, request
 from flask_cors import CORS
 
 from indexer import load_index, search
@@ -109,61 +109,110 @@ ABSTAIN_REPLY = (
 def chat():
     user_message = request.json["message"]
     log.info("chat q=%r", user_message)
+    # Stream the answer token-by-token when the client asks for it (the web UI
+    # sends `Accept: text/event-stream`); fall back to a single JSON body for
+    # programmatic callers (e.g. test_api.py). Both paths run the identical
+    # retrieval → gate → verify pipeline — only answer delivery differs.
+    if "text/event-stream" in request.headers.get("Accept", ""):
+        return Response(
+            _chat_stream(user_message),
+            mimetype="text/event-stream",
+            # Defeat any response buffering between here and the browser so deltas
+            # arrive as they're produced (no-cache for proxies, X-Accel for nginx).
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+    return jsonify(_chat_once(user_message))
 
-    # Retrieve the top-K most relevant chunks. indexer's rag.retrieval logger
-    # traces which channels ran (dense/BM25/router/rerank) and the exact chunks.
+
+def _retrieve(user_message):
+    """Retrieve top-K chunks; return (hits, retrieval_ms, t_start).
+
+    indexer's rag.retrieval logger traces which channels ran (dense/BM25/router/
+    rerank) and the exact chunks. t_start is captured just before retrieval so a
+    later total_ms spans the whole request (retrieval round-trip + LLM + verify),
+    matching what the non-streaming path reported before.
+    """
     t_start = time.perf_counter()
     hits = search(user_message, INDEX, k=TOP_K)
     retrieval_ms = (time.perf_counter() - t_start) * 1000  # incl. query-embedding round-trip
+    return hits, retrieval_ms, t_start
 
-    # Relevance gate: if the best dense-cosine match is below the bar, abstain up
-    # front — no LLM call, no chance to hallucinate an answer the corpus can't
-    # support. Gate on dense_score (raw cosine), not the hybrid `score`, which is
-    # rank-based and not comparable to the calibrated cosine threshold.
+
+def _gate_ok(hits):
+    """Relevance gate: True iff the best dense-cosine match clears the bar.
+
+    Gate on dense_score (raw cosine), not the hybrid `score`, which is rank-based
+    and not comparable to the calibrated cosine threshold. Below the bar we abstain
+    up front — no LLM call, no chance to hallucinate an answer the corpus can't
+    support. Returns (ok, top_dense) so the caller can log the score it decided on.
+    """
     top_dense = max((h["dense_score"] for h in hits), default=0.0)
-    if not hits or top_dense < MIN_TOP_SCORE:
-        log.info(
-            "gate top_dense=%.3f < %.2f -> ABSTAIN (no LLM call) | retrieval=%.0fms in=0 out=0",
-            top_dense, MIN_TOP_SCORE, retrieval_ms,
-        )
-        return jsonify({
-            "reply": ABSTAIN_REPLY,
-            "citations": [],
-            "abstained": True,
-            "meta": {
-                "question": user_message,
-                "retrieval_ms": round(retrieval_ms),
-                "total_ms": round(retrieval_ms),
-            },
-        })
-    log.info(
-        "gate top_dense=%.3f >= %.2f -> ANSWER (%d chunks in context)",
-        top_dense, MIN_TOP_SCORE, len(hits),
-    )
+    return bool(hits) and top_dense >= MIN_TOP_SCORE, top_dense
 
-    # Augment the prompt with a numbered context block so the model can ground
-    # its answer and cite sources.
+
+def _build_user_content(user_message, hits):
+    """Numbered context block + question, so the model can ground and cite [n]."""
     context = "\n\n".join(f"[{i + 1}] {h['text']}" for i, h in enumerate(hits))
-    user_content = f"CONTEXT:\n{context}\n\nQUESTION:\n{user_message}"
+    return f"CONTEXT:\n{context}\n\nQUESTION:\n{user_message}"
 
-    # Single-turn: only this question + the retrieved context is sent — no prior
-    # conversation is threaded in — so input_tokens ≈ system + context + question.
-    t_llm = time.perf_counter()
-    resp = client.messages.create(
-        model=CHAT_MODEL,
-        max_tokens=1024,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_content}],
-    )
-    llm_ms = (time.perf_counter() - t_llm) * 1000
-    # The model appends a machine-readable support block (see SYSTEM_PROMPT); split
-    # it off so `answer` is the display text and `quotes` maps each cited [n] to the
-    # verbatim span the model claims supports it. `quote_block` is False when no
-    # parseable block was emitted — verification then degrades to in-range-only.
-    answer, quotes, quote_block = _split_citation_block(resp.content[0].text)
+
+def _message_text(msg) -> str:
+    """Concatenate the text blocks of an Anthropic message (skip any non-text)."""
+    return "".join(b.text for b in msg.content if getattr(b, "type", None) == "text")
+
+
+def _abstain_payload(user_message, retrieval_ms) -> dict:
+    """The out-of-scope refusal — identical whether sent as JSON or an SSE `done`."""
+    return {
+        "reply": ABSTAIN_REPLY,
+        "citations": [],
+        "abstained": True,
+        "meta": {
+            "question": user_message,
+            "retrieval_ms": round(retrieval_ms),
+            "total_ms": round(retrieval_ms),
+        },
+    }
+
+
+def _sse(event: dict) -> str:
+    """Serialize one event as an SSE `data:` frame (double-newline terminated)."""
+    return f"data: {json.dumps(event)}\n\n"
+
+
+def _emittable_prefix(raw: str, marker: str) -> int:
+    """Length of `raw` that is safe to stream without leaking the citation marker.
+
+    Everything before a fully-present marker is safe (the tail is the machine-only
+    support block, never shown to the user). Before the marker appears we withhold
+    the longest suffix of `raw` that is a prefix of `marker`, so a marker split
+    across deltas is never partially shown; that held-back tail is delivered in the
+    final `done` event's authoritative `reply` instead.
+    """
+    idx = raw.find(marker)
+    if idx != -1:
+        return idx
+    for k in range(min(len(marker) - 1, len(raw)), 0, -1):
+        if raw.endswith(marker[:k]):
+            return len(raw) - k
+    return len(raw)
+
+
+def _finalize(raw, usage, hits, user_message, retrieval_ms, llm_ms, t_start) -> dict:
+    """Verify citations against the model's supporting quotes and assemble the
+    final answer payload (reply, citations, grounding flags, meta).
+
+    Shared by the streaming and non-streaming paths — the only thing that differs
+    upstream is how `raw` (the model's full output) and `usage` were obtained.
+
+    The model appends a machine-readable support block (see SYSTEM_PROMPT); split
+    it off so `answer` is the display text and `quotes` maps each cited [n] to the
+    verbatim span the model claims supports it. `quote_block` is False when no
+    parseable block was emitted — verification then degrades to in-range-only.
+    """
+    answer, quotes, quote_block = _split_citation_block(raw)
 
     # Token usage + latency (total = retrieval, incl. embedding round-trip, + LLM).
-    usage = resp.usage
     total_ms = (time.perf_counter() - t_start) * 1000
     cost_usd = round(
         usage.input_tokens * COST_PER_INPUT_TOKEN
@@ -264,14 +313,99 @@ def chat():
             answer,
         )
 
-    return jsonify({
+    return {
         "reply": safe_answer,
         "citations": citations,
         "grounded": bool(citations),
         "invalid_citations": invalid,
         "unsupported_citations": unsupported,
         "meta": meta,
-    })
+    }
+
+
+def _chat_once(user_message) -> dict:
+    """Non-streaming path: retrieve, gate, one blocking LLM call, verify, return
+    the full JSON payload in one shot."""
+    hits, retrieval_ms, t_start = _retrieve(user_message)
+    ok, top_dense = _gate_ok(hits)
+    if not ok:
+        log.info(
+            "gate top_dense=%.3f < %.2f -> ABSTAIN (no LLM call) | retrieval=%.0fms in=0 out=0",
+            top_dense, MIN_TOP_SCORE, retrieval_ms,
+        )
+        return _abstain_payload(user_message, retrieval_ms)
+    log.info(
+        "gate top_dense=%.3f >= %.2f -> ANSWER (%d chunks in context)",
+        top_dense, MIN_TOP_SCORE, len(hits),
+    )
+
+    # Single-turn: only this question + the retrieved context is sent — no prior
+    # conversation is threaded in — so input_tokens ≈ system + context + question.
+    t_llm = time.perf_counter()
+    resp = client.messages.create(
+        model=CHAT_MODEL,
+        max_tokens=1024,
+        system=SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": _build_user_content(user_message, hits)}],
+    )
+    llm_ms = (time.perf_counter() - t_llm) * 1000
+    return _finalize(_message_text(resp), resp.usage, hits, user_message, retrieval_ms, llm_ms, t_start)
+
+
+def _chat_stream(user_message):
+    """Streaming path: same pipeline, but emit answer text as SSE `delta` events as
+    the model produces it, then a final `done` event with the verified citations
+    and meta (which can only be computed once the whole answer is in hand).
+
+    Live text is provisional: the machine-only <<<CITATIONS>>> block is withheld,
+    and citation verification / [?] neutralization run on the complete text in
+    `_finalize`, so the `done` event carries the authoritative `reply` the client
+    should settle on (it may differ from what streamed only where a [n] was dropped
+    to [?]). Yielding `error` is the only way to signal a mid-flight failure, since
+    the 200 response is already committed once the first byte is sent.
+    """
+    try:
+        hits, retrieval_ms, t_start = _retrieve(user_message)
+        ok, top_dense = _gate_ok(hits)
+        if not ok:
+            log.info(
+                "gate top_dense=%.3f < %.2f -> ABSTAIN (no LLM call) | retrieval=%.0fms in=0 out=0",
+                top_dense, MIN_TOP_SCORE, retrieval_ms,
+            )
+            yield _sse({"type": "done", **_abstain_payload(user_message, retrieval_ms)})
+            return
+        log.info(
+            "gate top_dense=%.3f >= %.2f -> ANSWER (%d chunks in context)",
+            top_dense, MIN_TOP_SCORE, len(hits),
+        )
+
+        t_llm = time.perf_counter()
+        raw = ""
+        emitted = 0
+        with client.messages.stream(
+            model=CHAT_MODEL,
+            max_tokens=1024,
+            system=SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": _build_user_content(user_message, hits)}],
+        ) as stream:
+            for delta in stream.text_stream:
+                raw += delta
+                # Emit only what can't be part of the trailing <<<CITATIONS>>>
+                # block, holding back a possible partial marker until it resolves.
+                safe = _emittable_prefix(raw, CITATION_BLOCK_MARKER)
+                if safe > emitted:
+                    yield _sse({"type": "delta", "text": raw[emitted:safe]})
+                    emitted = safe
+            final = stream.get_final_message()
+        llm_ms = (time.perf_counter() - t_llm) * 1000
+
+        payload = _finalize(
+            _message_text(final), final.usage, hits, user_message, retrieval_ms, llm_ms, t_start,
+        )
+        yield _sse({"type": "done", **payload})
+    except Exception:
+        log.exception("streaming chat failed")
+        yield _sse({"type": "error", "message": "The server hit an error while generating the answer."})
 
 
 def _normalize(s: str) -> str:
@@ -352,4 +486,6 @@ def _build_citations(answer: str, hits: list[dict], allowed: set, quotes: dict) 
 
 
 if __name__ == "__main__":
-    app.run(port=5000, debug=True)
+    # threaded=True so a long-lived streaming response doesn't block other
+    # requests (the dev server is single-threaded otherwise).
+    app.run(port=5000, debug=True, threaded=True)

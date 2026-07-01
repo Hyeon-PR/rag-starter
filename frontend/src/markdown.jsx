@@ -132,6 +132,15 @@ function renderInline(text, ctx, keyPrefix) {
             </sup>,
           )
         }
+      } else if (ctx.pending) {
+        // Still streaming: the citation set isn't known yet, so show the marker
+        // neutrally rather than pre-emptively flagging it. It settles to a real
+        // badge (or a flag) once the final `done` event replaces the text.
+        nodes.push(
+          <sup key={key} className="cite pending" aria-hidden="true">
+            {n}
+          </sup>,
+        )
       } else {
         // Unverifiable reference: keep it visible but visibly flagged so it is
         // never mistaken for a real, checkable source.
@@ -254,10 +263,12 @@ function parseBlocks(text) {
 // Memoized so a full App re-render (e.g. on every keystroke in the composer)
 // doesn't re-parse the markdown of every prior answer. Effective only if the
 // `citations` prop is a stable reference — App passes `m.citations` directly.
-export const Markdown = memo(function Markdown({ text, citations, onCite }) {
+export const Markdown = memo(function Markdown({ text, citations, onCite, pending }) {
   // onCite(n) lets a clicked inline chip drive the Sources list (scroll to +
   // open source n). It must be a stable ref or the memo below won't hold.
-  const ctx = { byNum: new Map((citations || []).map((c) => [c.n, c])), onCite }
+  // `pending` (answer still streaming) renders not-yet-known [n] markers neutrally
+  // instead of flagging them as unverified.
+  const ctx = { byNum: new Map((citations || []).map((c) => [c.n, c])), onCite, pending }
   const rendered = parseBlocks(text || '').map((b, bi) => {
     const key = `b${bi}`
     switch (b.type) {

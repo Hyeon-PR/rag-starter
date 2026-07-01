@@ -209,6 +209,43 @@ function AssistantMessage({ m }) {
     setFocus((f) => ({ n, tick: (f?.tick || 0) + 1 }))
   }, [])
 
+  // While the answer is still streaming and no text has landed yet, show the
+  // typing indicator — this placeholder message replaces the old standalone one.
+  if (m.streaming && !m.text) {
+    return (
+      <div className="row assistant">
+        <div className="avatar" aria-hidden="true">A</div>
+        <div className="bubble typing-bubble" aria-label="Searching the corpus and thinking">
+          <span className="typing">
+            <span></span>
+            <span></span>
+            <span></span>
+          </span>
+        </div>
+      </div>
+    )
+  }
+
+  // Streaming with partial text — or an interrupted partial that never reached
+  // the verified `done` payload (Stop / drop / error mid-stream). Either way the
+  // citation set is unknown, so render the text with [n] markers neutral (via
+  // `pending`) and hold the sources / verification / metrics footer: routing an
+  // unverified partial through the verifier with an empty citation set would
+  // falsely flag its real citations as hallucinated. The blinking caret (a CSS
+  // ::after) shows only while text is actively arriving.
+  if (m.streaming || m.interrupted) {
+    return (
+      <div className="row assistant">
+        <div className="avatar" aria-hidden="true">A</div>
+        <div className="bubble">
+          <div className={`answer${m.streaming ? ' streaming' : ''}`}>
+            <Markdown text={m.text} citations={m.citations} pending />
+          </div>
+        </div>
+      </div>
+    )
+  }
+
   const sources = m.citations || []
   // Verify the [n] markers in the final answer against the sources the backend
   // actually returned, so the UI can vouch for what it renders (and flag any
@@ -328,7 +365,14 @@ export default function App() {
     const q = (typeof raw === 'string' ? raw : input).trim()
     if (!q || sending) return
 
-    setMessages((prev) => [...prev, { id: nextId(), role: 'user', text: q }])
+    // Add the user turn and an empty streaming assistant placeholder up front, so
+    // deltas can flow straight into it (and it doubles as the typing indicator).
+    const assistantId = nextId()
+    setMessages((prev) => [
+      ...prev,
+      { id: nextId(), role: 'user', text: q },
+      { id: assistantId, role: 'assistant', text: '', citations: [], abstained: false, meta: null, streaming: true },
+    ])
     setInput('')
     resetComposerHeight()
     setStatus('sending')
@@ -341,10 +385,15 @@ export default function App() {
       controller.abort()
     }, REQUEST_TIMEOUT_MS)
 
+    // Update only our streaming assistant message (matched by its stable id).
+    const patch = (fn) =>
+      setMessages((prev) => prev.map((mm) => (mm.id === assistantId ? fn(mm) : mm)))
+
+    let gotText = false
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
         body: JSON.stringify({ message: q }),
         signal: controller.signal,
       })
@@ -356,31 +405,69 @@ export default function App() {
           `Server responded ${res.status} ${res.statusText}${detail ? ` — ${detail}` : ''}`,
         )
       }
+      if (!res.body) throw new Error('The server returned a response with no body to stream.')
 
-      let data
-      try {
-        data = await res.json()
-      } catch {
-        throw new Error('The server returned a response that was not valid JSON.')
+      // Parse the SSE stream: events are separated by a blank line, and each frame
+      // carries a single `data: {json}` line in our protocol.
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buf = ''
+      let done = null
+
+      for (;;) {
+        const { value, done: streamDone } = await reader.read()
+        if (streamDone) break
+        buf += decoder.decode(value, { stream: true })
+        let sep
+        while ((sep = buf.indexOf('\n\n')) !== -1) {
+          const frame = buf.slice(0, sep)
+          buf = buf.slice(sep + 2)
+          const dataLine = frame.split('\n').find((l) => l.startsWith('data:'))
+          if (!dataLine) continue
+          let evt
+          try {
+            evt = JSON.parse(dataLine.slice(5).trim())
+          } catch {
+            continue // ignore an unparseable frame rather than dropping the stream
+          }
+          if (evt.type === 'delta') {
+            gotText = true
+            patch((mm) => ({ ...mm, text: mm.text + (evt.text || '') }))
+          } else if (evt.type === 'done') {
+            done = evt
+          } else if (evt.type === 'error') {
+            throw new Error(evt.message || 'The server hit an error while generating the answer.')
+          }
+        }
       }
 
-      const reply = (data?.reply ?? '').toString().trim()
+      if (!done) throw new Error('The stream ended before the answer was complete.')
+      const reply = (done.reply ?? '').toString().trim()
       if (!reply) throw new Error('The server returned an empty answer.')
-
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: nextId(),
-          role: 'assistant',
-          text: reply,
-          citations: Array.isArray(data.citations) ? data.citations : [],
-          // The gate's out-of-scope refusal (abstained) legitimately carries no
-          // citations; a normal answer with none is ungrounded — distinguish them.
-          abstained: data.abstained === true,
-          meta: data.meta || null,
-        },
-      ])
+      // Settle on the authoritative payload: replace the provisional streamed text
+      // (which differs only where a [n] was neutralized to [?]) and attach the
+      // verified citations + meta.
+      patch((mm) => ({
+        ...mm,
+        text: reply,
+        citations: Array.isArray(done.citations) ? done.citations : [],
+        // The gate's out-of-scope refusal (abstained) legitimately carries no
+        // citations; a normal answer with none is ungrounded — distinguish them.
+        abstained: done.abstained === true,
+        meta: done.meta || null,
+        streaming: false,
+      }))
     } catch (err) {
+      // Interrupted mid-stream: keep any partial answer already on screen so it
+      // doesn't vanish, but mark it `interrupted` (not a normal settled answer) —
+      // it never got the verified `done` payload, so it must NOT be run through
+      // citation verification (which would flag its real [n] as hallucinated).
+      // Otherwise drop the empty placeholder.
+      if (gotText) {
+        patch((mm) => ({ ...mm, streaming: false, interrupted: true }))
+      } else {
+        setMessages((prev) => prev.filter((mm) => mm.id !== assistantId))
+      }
       pushError(err, q, didTimeout)
     } finally {
       clearTimeout(timer)
@@ -469,19 +556,8 @@ export default function App() {
             <Message key={m.id} m={m} onRetry={send} sending={sending} />
           ))
         )}
-
-        {sending && (
-          <div className="row assistant">
-            <div className="avatar" aria-hidden="true">A</div>
-            <div className="bubble typing-bubble" aria-label="Searching the corpus and thinking">
-              <span className="typing">
-                <span></span>
-                <span></span>
-                <span></span>
-              </span>
-            </div>
-          </div>
-        )}
+        {/* The streaming assistant placeholder (added on send) is the typing
+            indicator now — it shows the dots until the first token lands. */}
         <div ref={bottomRef} />
       </main>
 

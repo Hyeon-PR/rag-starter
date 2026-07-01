@@ -12,7 +12,7 @@ This is an incremental upgrade path from the *actual* repo toward the contest ta
 
 ## Implementation status (updated 2026-07-02)
 
-The rest of this doc is a **roadmap** written against the *starter*. This section is the reality check — what the running code does **today** — so the KEEP / ADD / REPLACE tags below read correctly.
+The rest of this doc is a **roadmap** written against the *starter*. This section is the reality check — what the running code does **today** — so the KEEP / ADD / REPLACE tags below read correctly. The Phase 1–3 **diagrams** have been trimmed to the shipped pipeline only — conversational memory / multi-turn, SSE streaming, the guardrail layers, cross-encoder rerank, the ANN store, and NLI verification are *removed from the diagrams*; the KEEP / ADD / REPLACE **prose** around each diagram still describes the target design.
 
 **Shipped**
 - Structure-aware §-level chunking with a `14 CFR §` citation + title prefix (`cfr_ingest.py`).
@@ -52,26 +52,23 @@ Assumed weights (state explicitly; re-prioritize if the grader's split differs):
 
 ### 1.1 Retrieval Strategy
 
+*Shipped pipeline only — the KEEP / ADD / REPLACE prose around this diagram is the target design.*
+
 ```
- conversation memory (history[])
-        │
- latest turn ─► standalone-query rewrite (Haiku, when history≠∅)
-        │ self-contained q
-        ├──────────────┬───────────────┬──────────────┐
-        ▼              ▼               ▼               │
- §-NUMBER ROUTER   DENSE (Voyage 4)  SPARSE (BM25,    │
- exact Part/§      ANN, top-40       IDF/len-norm)    │
- fast-path                           top-40           │
-        └──────────────RRF (k=60)──────────────► fused top-30
-                        │
-            cross-encoder rerank (Voyage rerank-2.5 / bge-reranker-v2-m3)
-                        │ sigmoid(logits) → s∈[0,1]
-            gate s ≥ τ_gate ; child→parent dedup (max-s)
-                        │
-            fill to ≤2,000-tok CONTEXT budget (hard n≤6) ; cite CHILD
-                        │
-        if top-s < τ_expand → multi-query + HyDE → re-fuse (one extra round)
-                        ▼ numbered CONTEXT → generator
+ query ─► embed once (Gemini gemini-embedding-001, 1536-d, input_type="query", unit-normalized)
+   │
+   ├─ §/Part ROUTER  : regex bonus pins chunks whose § or Part the query names
+   ├─ DENSE          : brute-force cosine over index.pkl (numpy scan)
+   └─ BM25 (lexical) : Okapi BM25, built in-process
+   │
+   ▼
+ RRF fuse (dense ×5 ⊕ BM25 ×1) + router bonus + force-include the corpus-best cosine chunk
+   │
+   ▼
+ top-k (k=8) ─► GATE: max dense-cosine ≥ 0.66 ?
+   │                   └─ below → ABSTAIN, no LLM call
+   ▼
+ numbered CONTEXT [1]…[8] ─► generator (Sonnet 4.6)
 ```
 
 - **Chunking — REPLACE** the blind window with **structure-aware small-to-big.** **KEEP** the boundary-snapping. For CFR, split on the **Part → Subpart → § hierarchy** into **parents** (over-long sections become ordered `part 1/2/…` sub-parents sharing a `heading_path`); sub-split parents into **child chunks** sized to the embedder window. Embed and *cite the child* (passage-level precision); show the parent as expandable UI context. **ADD** metadata `{title, heading_path, cfr_citation (e.g. "14 CFR § 91.119"), part, subpart, section, doc_type='regulation', parent_id, child_chunk_index}`; prefix `heading_path` + `cfr_citation` into the embedded text (contextual retrieval). Do **not** window-chunk legal text — the § boundary is both the semantic unit and the citation unit.
@@ -116,54 +113,54 @@ Acronyms: **ANN** (Approximate Nearest Neighbor), **BM25** (Best-Match 25 lexica
 
 ### 2.1 Offline ingest (idempotent, `doc_hash`-gated)
 
+*Shipped pipeline only — the KEEP / ADD / REPLACE prose around this diagram is the target design.*
+
 ```
-14 CFR (all parts; FAA PDFs/XML) ─► 1. LOAD+NORMALIZE (PDF: unstructured/PyMuPDF; prefer eCFR bulk XML if available;
-                                                      detect Part/Subpart/§ structure; log+skip unhandled)
-                                    2. STRUCTURE-AWARE CHUNK (split on §; carry cfr_citation; REPLACE window chunker)
-                                    3. ENRICH + STABLE ID (citation_id = blake2b(norm_text|cfr_citation|chunker_version);
-                                                           {cfr_citation, part, subpart, section, char_span, norm_text, doc_hash})
-                                    4. EMBED (voyage-4-large, input_type="document", normalized; quantize int8)
-                                    ├─► 5a UPSERT dense (pgvector/Qdrant HNSW, payload=metadata; REPLACE index.pkl)
-                                    └─► 5b INDEX sparse (BM25 + a §-number lookup table, keyed by citation_id; ADD)
+14 CFR (eCFR public API, per-Part XML) ─► 1. FETCH + PARSE (cfr_ingest.py: eCFR XML → detect Part/Subpart/§)
+                                          2. STRUCTURE-AWARE CHUNK (split on §; prefix "14 CFR §" citation + title)
+                                          3. METADATA {cfr_citation, title, part, subpart, section,
+                                                       source, chunk_index, text} → data/corpus.jsonl
+                                          4. EMBED (indexer.py: Gemini gemini-embedding-001, 1536-d,
+                                                    input_type="document", unit-normalized)
+                                          5. PICKLE records+embeddings → index.pkl  (BM25 built in-process at load)
 ```
 
-`citation_id` hashes **normalized chunk text + `cfr_citation`** (reproducible for unchanged passages; rotates only on re-extract/chunker change — `chunker_version` makes rotations detectable). Prefer the **eCFR bulk XML** source over PDF where possible — it carries the Part/§ structure natively, avoiding the lossy PDF flattening. `char_span` indexes the **stored normalized extraction**.
+Today each chunk is keyed only by its `chunk_index` + canonical `cfr_citation` (which is also its `source`); there is **no** content-hash `citation_id` or `char_span` yet. **Roadmap:** a stable `citation_id` = hash of *normalized chunk text + `cfr_citation`* (reproducible for unchanged passages; rotates only on re-extract/chunker change — a `chunker_version` making rotations detectable), plus a `char_span` into the stored normalized extraction for exact-offset citation. The corpus already comes from the **eCFR API XML** (not the `documents/` PDFs) — it carries the Part/§ structure natively, avoiding the lossy PDF flattening.
 
 ### 2.2 Query-time lifecycle
 
+*Shipped pipeline only — the KEEP / ADD / REPLACE prose around this diagram is the target design.*
+
 ```
-(1) {message, session_id} ─► 400 on malformed (not 500)
-(2) INTAKE GUARDRAIL (user turn): scope? adversarial? ambiguous?  → reject/clarify → stream canned, STOP
-(3) MEMORY CONDENSE (if history): last N turns + msg → standalone q*        [skipped on single-turn]
-(3b) §-NUMBER ROUTER: q* names an explicit Part/§? → exact metadata fetch (skip dense), else continue
-(4) HYBRID RETRIEVE wide: dense top-30 ⊕ BM25 top-30 → RRF → ~40 candidates
-(4b) CHUNK SANITIZE: strip/flag injection patterns; context is DATA, not instructions
-(5) RERANK: Voyage rerank-2.5 / bge-reranker-v2-m3 → sigmoid ∈[0,1]
-(6) GATE: keep s ≥ τ_r, cap k=6 → empty? → abstain sentinel, STOP
-(7) ASSEMBLE numbered CONTEXT + per-request n→record map (each carries cfr_citation)
-(8) GENERATE (Sonnet, SSE stream): inline [n] tokens stream live to UI
-(9) CITATION-VERIFY (on completed text, pre-final-event): resolve + sentence-window support-check each [n]
-(10) FINAL SSE EVENT: verified citation set (with § paths) → UI patches markers
-(11) PERSIST turn → session memory
+(1) POST /api/chat {message}
+(2) §/Part ROUTER: message names an explicit § or Part? → regex bonus pins those chunks
+(3) HYBRID RETRIEVE: dense cosine ⊕ BM25 → RRF (+ router bonus, + force-include corpus-best cosine) → top-k (k=8)
+(4) GATE: max dense-cosine ≥ 0.66? → below → abstain sentinel, STOP (no LLM call)
+(5) ASSEMBLE numbered CONTEXT [1]…[k] + n→record map (each carries cfr_citation)
+(6) GENERATE (Sonnet 4.6, max_tokens=1024, streamed): answer with inline [n] + a <<<CITATIONS>>> {n: verbatim quote} block
+(7) CITATION-VERIFY (on the completed text): keep [n] iff in-range AND its quote is a verbatim substring of source[n]; else drop → [?]
+(8) RESPOND: SSE `delta` events (answer text, <<<CITATIONS>>> block stripped) then a terminal `done` = {reply, citations, grounded, meta{cost_usd, …}}
+             — verify (7) runs before `done`, so a marker briefly streamed can flip to [?] there. (Non-stream clients get that same payload as one JSON body.)
 ```
 
-Each pre-generation stage is serial on the hot path and **fails open where safe** (guardrail/condense timeouts fall back so a transient stall never drops a valid turn); the gate (6) and verify (9) **fail closed**.
+Each pre-generation stage is serial on the hot path and **fails open where safe** (guardrail/condense timeouts fall back so a transient stall never drops a valid turn); the gate (4) and verify (7) **fail closed**.
 
 ### 2.3 Citation mapping flow
 
+*Shipped pipeline only — the KEEP / ADD / REPLACE prose around this diagram is the target design.*
+
 ```
-RETRIEVED hits (k≤6) ─► build map M: n→{citation_id, cfr_citation, char_span, norm_text}
-   ─► data-delimited CONTEXT "[1]…[2]…" → LLM (stream → UI live)
-   ─► completed ANSWER: split into claim-sentences; per [n]:
-        n∉M → DROP (out-of-range/invented)
-        substring/char_span hit → ACCEPT
-        else NLI entail ≥ τ_e → ACCEPT
-        else REPAIR: scan ONLY other in-context hits for an entailing sentence
-              found → re-point (record it) ; none → DROP (prefer a missing cite over an unseen-source one)
-   ─► RESOLVED refs [{n, citation_id, cfr_citation, char_span}] → FINAL SSE EVENT → badges + Sources pills
+RETRIEVED hits (k≤8) ─► build map n→{cfr_citation, section, part, source, text}
+   ─► numbered CONTEXT "[1]…[2]…" → LLM → answer + <<<CITATIONS>>> {n: verbatim quote}
+   ─► for each [n] used in the answer:
+        n out of range (n∉map)                       → DROP, neutralize to [?]
+        quote is a verbatim substring of source[n]   → ACCEPT (attach the verified quote)
+          (whitespace/case-normalized, ≥12 chars)
+        else (no quote, or quote not found)           → DROP, neutralize to [?]
+   ─► kept refs [{n, cfr_citation, section, part, text, quote}] → JSON response → UI badges + Source cards
 ```
 
-CFR citations are **canonical and externally verifiable** (`14 CFR § 91.119(b)` resolves on eCFR), which is close to free points on Citations & Grounding — surface the `§` path in the UI badge/pill. A resolver **`GET /passages/{citation_id}`** backed by the store payload makes the stable id resolvable for audit/grading. **KEEP** the existing dedup/range check as the innermost guard; **ADD** sentence-window support, constrained drop/repair, and the `cfr_citation` field. *Honest UX trade-off:* verification needs the complete answer, so a marker briefly streamed can be retracted on the final event. **Frontend is not unchanged:** it needs the streaming reader (`res.body.getReader()` + `TextDecoder`) and a `cfr_citation` tooltip edit.
+CFR citations are **canonical and externally verifiable** (`14 CFR § 91.119(b)` resolves on eCFR), which is close to free points on Citations & Grounding — surface the `§` path in the UI badge/pill. A resolver **`GET /passages/{citation_id}`** backed by the store payload makes the stable id resolvable for audit/grading. **KEEP** the existing dedup/range check as the innermost guard; **ADD** sentence-window support, constrained drop/repair, and the `cfr_citation` field. *Honest UX trade-off:* verification needs the complete answer, so a marker briefly streamed can be retracted on the final `done` event. **Shipped:** the frontend streams via `res.body.getReader()` + `TextDecoder`, rendering unverified `[n]` neutrally while in flight, then settles on the authoritative `done` payload (`reply` with any dropped marker already neutralized to `[?]`, plus verified `citations`).
 
 ---
 
@@ -187,27 +184,28 @@ CFR citations are **canonical and externally verifiable** (`14 CFR § 91.119(b)`
 
 ### 3.2 Safety Architecture & Guardrails
 
-The starter ships **zero guardrails**. Add three fail-closed layers (any layer that errors/times out → retry once → refuse):
+The starter's shipped safety is **two deterministic, fail-closed gates** (diagram below). The three layered guardrail layers described after it are **roadmap** — no input classifier, payload/injection defense, or NLI groundedness judge ships today.
+
+*Shipped pipeline only — the layered L1/L2/L3 design in the prose below this diagram is the target.*
 
 ```
-USER MESSAGE (untrusted)
- ├ L1 INPUT:  1a JSON/size guard (400, 1–2000 chars)  1b PII→logs only (Presidio)
- │            1c scope classify (Haiku) → out-of-scope REFUSE  1d within-message ambiguity → CLARIFY  1e jailbreak label → REFUSE
- ▼   (one combined Haiku verdict call, ~$0.0007)
-RETRIEVE (hybrid, distance-thresholded)
- ├ L2 PAYLOAD: 2a all chunks = DATA (system clause)  2b spotlight: per-request nonce-fenced chunks
- │             2c injection screen (regex log-trigger → Haiku on flagged only)  2d instruction-hierarchy prompt
- ▼   (soft mitigations — the hard backstop is L3a)
-CLAUDE (sonnet-4-6)
- ├ L3 OUTPUT: 3a groundedness gate (Haiku/NLI per-sentence) — coverage <90% → ABSTAIN
- │            3b refusal path + top-hit-score pre-check (REQUIRES search() to return scores)  3c prompt-leak + toxicity screen
- ▼
-{reply, citations, refusal_reason?}   — any layer low-confidence/error → retry once → fail-closed refusal
+USER MESSAGE
+   │
+ RETRIEVE (hybrid)
+   │
+ GATE 1 — fail-closed: max dense-cosine ≥ 0.66 ?
+   │        └─ below → ABSTAIN, no LLM call   (also screens off-topic / out-of-scope / injected queries)
+ GENERATE (Sonnet 4.6)
+   │
+ GATE 2 — fail-closed: every cited [n] must carry a verbatim supporting quote (substring of the cited source)
+   │        └─ fails the check → marker dropped, neutralized to [?]
+   ▼
+ {reply, citations, grounded}
 ```
 
 - **Injection from retrieved payloads (the headline RAG threat):** 2a/2b/2d are *soft*; the **only hard guarantee is 3a** — an answer not entailed by legitimate retrieved text is rejected. The nonce fence stops a malicious chunk from *closing* the data block; it does not make in-block directives inert. Concrete `app.py` change: HTML-escape chunk text, neutralize `[`/`]` and `QUESTION:` boundary-spoofing, wrap each in `<document id=… citation=…>` with a per-request nonce.
 - **Groundedness gate (the critical upgrade):** primary mechanism a Haiku per-sentence judge; if NLI is used, the premise **must be scoped to the cited chunk's best-matching span** (whole-chunk premises are out-of-distribution for NLI). Coverage <90% → abstain. (For an English-only contest a monolingual NLI like `nli-deberta-v3` is fine; multilingual `mDeBERTa-XNLI` only if non-English answers are possible.)
-- **`search()` must change** to return `(score, record)` so the top-hit pre-check can short-circuit hopeless queries before the Sonnet call.
+- **`search()` already returns per-hit scores** (`dense_score`, the raw cosine): the shipped relevance gate reads `max(dense_score)` and short-circuits hopeless queries with a 0-token abstain *before* the Sonnet call. (Roadmap: extend the same pre-check to the reranker's `s∈[0,1]` once rerank is on by default.)
 - **Honest trade-off:** guardrails add ~+0.8–1.3 s and ~+7–14% cost on the normal path, bounded by the classifier timeout and a per-answer sentence cap; under sustained degradation, retry-then-refuse trades availability for safety on a fraction of valid questions — by design.
 
 ---

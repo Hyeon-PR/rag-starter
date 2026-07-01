@@ -315,6 +315,35 @@ body {
   color: var(--error-ink);
   cursor: help; /* not navigable — nothing to jump to */
 }
+/* A [n] marker while the answer is still streaming: the citation set isn't known
+   yet, so render it neutrally (neither a live badge nor a flag) until it settles. */
+.cite.pending {
+  background: var(--panel-2);
+  color: var(--muted);
+  cursor: default;
+}
+
+/* Blinking caret trailing the last block of a still-streaming answer. As an
+   ::after on the last child it flows inline right after the text. */
+.answer.streaming > :last-child::after {
+  content: '';
+  display: inline-block;
+  width: 2px;
+  height: 1.05em;
+  margin-left: 2px;
+  background: var(--accent);
+  vertical-align: text-bottom;
+  animation: caret-blink 1.05s step-end infinite;
+}
+@keyframes caret-blink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0;
+  }
+}
 
 /* Inline citation with a hover/focus preview of its retrieved passage. The
    card is positioned above the chip; near the very top/edges of the scroll
