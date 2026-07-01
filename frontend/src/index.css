@@ -167,6 +167,9 @@ body {
   display: flex;
   flex-direction: column;
   overflow-y: auto;
+  /* A near-edge citation preview card can extend past the right edge; clip it
+     rather than letting it raise a horizontal scrollbar for the whole log. */
+  overflow-x: hidden;
   padding: 18px 2px 8px;
   scroll-behavior: smooth;
 }
@@ -306,6 +309,54 @@ body {
 .cite.invalid {
   background: var(--error-bg);
   color: var(--error-ink);
+}
+
+/* Inline citation with a hover/focus preview of its retrieved passage. The
+   card is positioned above the chip; near the very top/edges of the scroll
+   region it may clip — the always-available Sources pill is the full fallback. */
+.cite-wrap {
+  position: relative;
+}
+.cite-pop {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  z-index: 20;
+  width: max-content;
+  max-width: min(300px, 80vw);
+  padding: 8px 10px;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  font-size: 0.78rem;
+  font-weight: 400;
+  line-height: 1.45;
+  text-align: left;
+  white-space: normal; /* override the bubble's pre-wrap */
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateX(-50%) translateY(4px);
+  transition: opacity 0.12s ease, transform 0.12s ease;
+}
+.cite-wrap:hover .cite-pop,
+.cite-wrap:focus-within .cite-pop {
+  opacity: 1;
+  visibility: visible;
+  transform: translateX(-50%) translateY(0);
+}
+.cite-pop-head {
+  display: block;
+  margin-bottom: 4px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+.cite-pop-body {
+  display: block;
+  color: var(--text);
 }
 
 /* Citation-token verification status under an answer */

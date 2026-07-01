@@ -54,6 +54,16 @@ export function verifyCitations(text, citations) {
 const INLINE_RE =
   /(`[^`\n]+`)|(\*\*[^*\n]+\*\*|__[^_\n]+__)|(\*[^*\n]+\*|_[^_\n]+_)|\[(\d+)\]|(\[\?\])/g
 
+// Collapse whitespace and clip to `max` chars (on a word boundary where it's
+// clean) for the inline citation preview card.
+function snippet(text, max) {
+  const t = (text || '').replace(/\s+/g, ' ').trim()
+  if (t.length <= max) return t
+  const cut = t.slice(0, max)
+  const sp = cut.lastIndexOf(' ')
+  return `${(sp > max * 0.6 ? cut.slice(0, sp) : cut).trimEnd()}…`
+}
+
 function renderInline(text, ctx, keyPrefix) {
   const nodes = []
   let last = 0
@@ -76,7 +86,28 @@ function renderInline(text, ctx, keyPrefix) {
     } else if (m[4] !== undefined) {
       const n = Number(m[4])
       const c = ctx.byNum.get(n)
-      if (c) {
+      if (c && c.text) {
+        // Perplexity-style peek: hovering or keyboard-focusing the chip reveals
+        // a small card with the CFR ref + a snippet of the exact retrieved
+        // passage, so a claim can be spot-checked without scrolling down to
+        // Sources. The full, unclipped passage still lives in the Sources pills.
+        const ref = c.cfr_citation || c.source
+        const popId = `${key}-pop`
+        nodes.push(
+          <span key={key} className="cite-wrap">
+            <sup className="cite" tabIndex={0} aria-describedby={popId} aria-label={`Citation ${n}: ${ref}`}>
+              {n}
+            </sup>
+            <span role="tooltip" id={popId} className="cite-pop">
+              <span className="cite-pop-head">
+                [{n}] {ref}
+              </span>
+              <span className="cite-pop-body">{snippet(c.text, 240)}</span>
+            </span>
+          </span>,
+        )
+      } else if (c) {
+        // Resolved citation with no retrieved text — plain badge, nothing to peek.
         nodes.push(
           <sup
             key={key}
