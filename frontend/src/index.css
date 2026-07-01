@@ -328,6 +328,62 @@ body {
   padding: 2px 8px;
   border-radius: 999px;
 }
+.source-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+/* A source pill that links out to eCFR */
+a.source-pill.link {
+  text-decoration: none;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+a.source-pill.link:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+/* "source text" expand/collapse toggle */
+.source-toggle {
+  background: none;
+  border: 0;
+  padding: 0 2px;
+  font: inherit;
+  font-size: 0.72rem;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.source-toggle:hover {
+  color: var(--accent);
+}
+/* The exact retrieved passage, shown in-app on expand. flex-basis:100% breaks
+   it onto its own row inside the wrapping .sources flex container. */
+.passage {
+  flex-basis: 100%;
+  margin: 6px 0 0;
+  padding: 8px 12px;
+  background: var(--panel-2);
+  border-left: 3px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 260px;
+  overflow-y: auto;
+}
+.passage-head {
+  display: block;
+  margin-bottom: 6px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+.passage-head a {
+  color: var(--accent);
+}
 
 .error-actions {
   margin-top: 8px;

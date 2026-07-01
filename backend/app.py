@@ -185,6 +185,25 @@ def chat():
     return jsonify({"reply": answer, "citations": citations, "meta": meta})
 
 
+def _ecfr_url(hit: dict) -> str:
+    """Deep link to the official eCFR page for a hit's CFR location.
+
+    Uses eCFR's section permalink (…/current/title-14/section-91.3) for a normal
+    numbered section; falls back to the Part page for appendices / SFARs or
+    anything without a clean section number. eCFR's exact path scheme lives only
+    here, so if it ever changes this is the one place to fix.
+    """
+    title = hit.get("title", 14)
+    section = (hit.get("section") or "").strip()
+    part = hit.get("part")
+    base = f"https://www.ecfr.gov/current/title-{title}"
+    if re.match(r"^\d+\.\w+$", section):
+        return f"{base}/section-{section}"
+    if part:
+        return f"{base}/part-{part}"
+    return base
+
+
 def _build_citations(answer: str, hits: list[dict]) -> list[dict]:
     """Return one citation entry per unique valid [n] used in the answer.
 
@@ -203,6 +222,13 @@ def _build_citations(answer: str, hits: list[dict]) -> list[dict]:
             "n": n,
             "source": h["source"],
             "chunk_index": h["chunk_index"],
+            # For the UI: jump straight to the source (eCFR deep link) and show
+            # the exact retrieved passage in-app.
+            "cfr_citation": h.get("cfr_citation"),
+            "section": h.get("section"),
+            "part": h.get("part"),
+            "url": _ecfr_url(h),
+            "text": h.get("text", ""),
         })
     return citations
 

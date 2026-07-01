@@ -43,6 +43,65 @@ function Metrics({ meta }) {
   )
 }
 
+// Sources under an answer. Each cited chunk links out to the official eCFR
+// section (new tab) so the user can jump straight to the source material, and
+// can expand to show the exact retrieved passage in-app.
+function Sources({ sources }) {
+  const [openN, setOpenN] = useState(null)
+  if (!sources.length) return null
+  const open = sources.find((c) => c.n === openN) || null
+  return (
+    <div className="sources">
+      <span className="sources-label">Sources</span>
+      {sources.map((c) => (
+        <span key={c.n} className="source-item">
+          {c.url ? (
+            <a
+              className="source-pill link"
+              href={c.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              title={`Open ${c.cfr_citation || c.source} on eCFR`}
+            >
+              [{c.n}] {c.source} <span aria-hidden="true">↗</span>
+            </a>
+          ) : (
+            <span className="source-pill" title={`chunk ${c.chunk_index}`}>
+              [{c.n}] {c.source}
+            </span>
+          )}
+          {c.text && (
+            <button
+              type="button"
+              className="source-toggle"
+              aria-expanded={openN === c.n}
+              onClick={() => setOpenN(openN === c.n ? null : c.n)}
+            >
+              {openN === c.n ? '▾ hide text' : '▸ source text'}
+            </button>
+          )}
+        </span>
+      ))}
+      {open && (
+        <blockquote className="passage">
+          <span className="passage-head">
+            [{open.n}] {open.cfr_citation || open.source}
+            {open.url && (
+              <>
+                {' · '}
+                <a href={open.url} target="_blank" rel="noopener noreferrer">
+                  open on eCFR ↗
+                </a>
+              </>
+            )}
+          </span>
+          {open.text}
+        </blockquote>
+      )}
+    </div>
+  )
+}
+
 function Message({ m, onRetry, sending }) {
   if (m.role === 'user') {
     return (
@@ -85,16 +144,7 @@ function Message({ m, onRetry, sending }) {
           {/* Pass m.citations (stable ref) not `sources` (fresh []) so memo holds. */}
           <Markdown text={m.text} citations={m.citations} />
         </div>
-        {sources.length > 0 && (
-          <div className="sources">
-            <span className="sources-label">Sources</span>
-            {sources.map((c) => (
-              <span key={c.n} className="source-pill" title={`chunk ${c.chunk_index}`}>
-                [{c.n}] {c.source}
-              </span>
-            ))}
-          </div>
-        )}
+        <Sources sources={sources} />
         {verify.total > 0 && (
           <div className={`verify ${verify.invalid.length ? 'warn' : 'ok'}`}>
             {verify.invalid.length === 0
