@@ -195,13 +195,26 @@ def chat():
         # silently returning it as if it were a normal cited answer. A hard
         # re-ask/abstain needs the entailment pass (roadmap); this is the flag.
         log.warning("non-abstained answer carries no citations — ungrounded")
+    # Neutralize any out-of-range/invented [n] in the returned answer so a
+    # consumer of `reply` that doesn't run the frontend verifier can't mistake it
+    # for a real, resolvable citation. Valid markers are untouched; invalid ones
+    # become a literal [?], which the frontend renders as a flagged badge.
+    safe_answer = answer
     if invalid:
-        log.warning("answer used citation(s) with no matching source: %s", invalid)
+        log.warning(
+            "answer used citation(s) with no matching source: %s (neutralized to [?])", invalid
+        )
+        safe_answer = re.sub(
+            r"\[(\d+)\]",
+            lambda m: m.group(0) if int(m.group(1)) in valid_ns else "[?]",
+            answer,
+        )
 
     return jsonify({
-        "reply": answer,
+        "reply": safe_answer,
         "citations": citations,
         "grounded": bool(citations),
+        "invalid_citations": invalid,
         "meta": meta,
     })
 

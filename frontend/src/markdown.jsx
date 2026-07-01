@@ -34,11 +34,17 @@ export function verifyCitations(text, citations) {
     total += 1
     ;(known.has(n) ? valid : invalid).add(n)
   }
+  // The backend rewrites any out-of-range/invented [n] to a literal [?] (see
+  // app.py), so a raw numeric invalid rarely reaches us; count the [?] markers
+  // as unresolved references so the banner still warns.
+  const unresolved = (scanned.match(/\[\?\]/g) || []).length
+  total += unresolved
   const asc = (a, b) => a - b
   return {
     total,
     valid: [...valid].sort(asc),
     invalid: [...invalid].sort(asc),
+    unresolved,
   }
 }
 
@@ -46,7 +52,7 @@ export function verifyCitations(text, citations) {
 // inside code isn't treated as emphasis), then bold before italic (so `**`
 // wins over `*`), then [n] citations.
 const INLINE_RE =
-  /(`[^`\n]+`)|(\*\*[^*\n]+\*\*|__[^_\n]+__)|(\*[^*\n]+\*|_[^_\n]+_)|\[(\d+)\]/g
+  /(`[^`\n]+`)|(\*\*[^*\n]+\*\*|__[^_\n]+__)|(\*[^*\n]+\*|_[^_\n]+_)|\[(\d+)\]|(\[\?\])/g
 
 function renderInline(text, ctx, keyPrefix) {
   const nodes = []
@@ -67,7 +73,7 @@ function renderInline(text, ctx, keyPrefix) {
       nodes.push(<strong key={key}>{renderInline(m[2].slice(2, -2), ctx, key)}</strong>)
     } else if (m[3]) {
       nodes.push(<em key={key}>{renderInline(m[3].slice(1, -1), ctx, key)}</em>)
-    } else {
+    } else if (m[4] !== undefined) {
       const n = Number(m[4])
       const c = ctx.byNum.get(n)
       if (c) {
@@ -95,6 +101,19 @@ function renderInline(text, ctx, keyPrefix) {
           </sup>,
         )
       }
+    } else {
+      // Neutralized unresolved marker [?] emitted by the backend for an
+      // out-of-range/invented reference — flag it, never show it as a source.
+      nodes.push(
+        <sup
+          key={key}
+          className="cite invalid"
+          aria-label="Unverified reference: no matching source"
+          title="No matching source — unverified reference"
+        >
+          ?
+        </sup>,
+      )
     }
     last = m.index + m[0].length
   }

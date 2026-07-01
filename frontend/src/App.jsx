@@ -182,6 +182,8 @@ function Message({ m, onRetry, sending }) {
   // actually returned, so the UI can vouch for what it renders (and flag any
   // reference with no matching source instead of quietly trusting it).
   const verify = verifyCitations(m.text, sources)
+  // Backend-neutralized [?] markers have no number but still count as unresolved.
+  const badCount = verify.invalid.length + (verify.unresolved || 0)
   return (
     <div className="row assistant">
       <div className="avatar" aria-hidden="true">A</div>
@@ -197,14 +199,16 @@ function Message({ m, onRetry, sending }) {
           <div className="verify">No sources cited for this answer.</div>
         )}
         {verify.total > 0 && (
-          <div className={`verify ${verify.invalid.length ? 'warn' : 'ok'}`}>
-            {verify.invalid.length === 0
+          <div className={`verify ${badCount ? 'warn' : 'ok'}`}>
+            {badCount === 0
               ? `✓ ${verify.valid.length} citation${verify.valid.length === 1 ? '' : 's'} resolve${
                   verify.valid.length === 1 ? 's' : ''
                 } to a retrieved source`
-              : `⚠ ${verify.invalid.length} unverified reference${
-                  verify.invalid.length === 1 ? '' : 's'
-                } (${verify.invalid.map((n) => `[${n}]`).join(', ')}) — no matching source`}
+              : `⚠ ${badCount} unverified reference${badCount === 1 ? '' : 's'}${
+                  verify.invalid.length
+                    ? ` (${verify.invalid.map((n) => `[${n}]`).join(', ')})`
+                    : ''
+                } — no matching source`}
           </div>
         )}
         {m.meta && <Metrics meta={m.meta} />}
