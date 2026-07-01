@@ -75,7 +75,7 @@ sources do not cover."""
 # cheap, hard guarantee against answering when nothing relevant was retrieved
 # (also screens off-topic and injected prompts). Re-calibrate per embedding
 # backend; env-tunable.
-TOP_K = int(os.environ.get("RETRIEVAL_K", "5"))
+TOP_K = int(os.environ.get("RETRIEVAL_K", "8"))
 MIN_TOP_SCORE = float(os.environ.get("RETRIEVAL_MIN_SCORE", "0.66"))
 CHAT_MODEL = os.environ.get("CHAT_MODEL", "claude-sonnet-4-6")
 ABSTAIN_REPLY = (

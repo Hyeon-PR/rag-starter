@@ -211,6 +211,14 @@ HYBRID = os.environ.get("HYBRID", "1").lower() in ("1", "true", "yes")
 RRF_K = int(os.environ.get("RRF_K", "60"))                     # RRF damping constant
 SECTION_BONUS = float(os.environ.get("SECTION_BONUS", "0.5"))  # exact §-number match
 PART_BONUS = float(os.environ.get("PART_BONUS", "0.003"))      # same-Part tie-breaker
+# Weights on the two RRF channels; default leans dense. Broad enumeration queries
+# ("which conditions disqualify …") need sibling sections that score well on
+# cosine but poorly on BM25 (little keyword overlap); equal-weight RRF lets
+# lexically-similar but off-target chunks (e.g. wrong-class "general medical
+# condition" sections) crowd them out. Weighting dense higher restores them. The
+# §/Part router bonus is added separately, so exact-citation lookups still pin.
+DENSE_WEIGHT = float(os.environ.get("DENSE_WEIGHT", "5.0"))
+LEXICAL_WEIGHT = float(os.environ.get("LEXICAL_WEIGHT", "1.0"))
 RERANK = os.environ.get("RERANK", "").lower() in ("1", "true", "yes")
 RERANK_MODEL = os.environ.get("RERANK_MODEL", "rerank-2.5")
 RERANK_POOL = int(os.environ.get("RERANK_POOL", "30"))         # fused candidates to rerank
@@ -409,7 +417,11 @@ def search(query: str, records: list[dict], k: int = 5) -> list[dict]:
             elif r.get("part") in parts:
                 bonus[i] = PART_BONUS
 
-    fused = 1.0 / (RRF_K + _ranks(sims) + 1) + 1.0 / (RRF_K + _ranks(bm) + 1) + bonus
+    fused = (
+        DENSE_WEIGHT / (RRF_K + _ranks(sims) + 1)
+        + LEXICAL_WEIGHT / (RRF_K + _ranks(bm) + 1)
+        + bonus
+    )
 
     # Candidate pool by fused score, but ALWAYS force-include the corpus-wide best
     # dense match. The relevance gate reads max(dense_score) from the returned
