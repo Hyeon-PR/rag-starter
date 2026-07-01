@@ -1,5 +1,5 @@
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
 
   --bg: #f5f5f7;
   --panel: #ffffff;
@@ -26,32 +26,35 @@
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.05), 0 8px 24px rgba(0, 0, 0, 0.05);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #0b0b0d;
-    --panel: #161618;
-    --panel-2: #202024;
-    --text: #f2f2f5;
-    --muted: #9a9aa2;
-    --border: #2a2a30;
-    --accent: #4c9bff;
+/* Dark palette — applied via the data-theme attribute on <html>. An inline
+   script in index.html sets it before first paint (from a saved choice, or the
+   OS preference on first visit); the header toggle flips it at runtime. */
+:root[data-theme='dark'] {
+  color-scheme: dark;
 
-    --user-bg: #2563eb;
-    --user-ink: #ffffff;
-    --assistant-bg: #202024;
-    --assistant-ink: #ececf0;
+  --bg: #0b0b0d;
+  --panel: #161618;
+  --panel-2: #202024;
+  --text: #f2f2f5;
+  --muted: #9a9aa2;
+  --border: #2a2a30;
+  --accent: #4c9bff;
 
-    --error-bg: #2a1416;
-    --error-border: #5b2a2a;
-    --error-ink: #ff7a72;
-    --notice-bg: #202024;
-    --notice-ink: #c4c4cc;
+  --user-bg: #2563eb;
+  --user-ink: #ffffff;
+  --assistant-bg: #202024;
+  --assistant-ink: #ececf0;
 
-    --cite-bg: #16324f;
-    --cite-ink: #8cc2ff;
+  --error-bg: #2a1416;
+  --error-border: #5b2a2a;
+  --error-ink: #ff7a72;
+  --notice-bg: #202024;
+  --notice-ink: #c4c4cc;
 
-    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.5);
-  }
+  --cite-bg: #16324f;
+  --cite-ink: #8cc2ff;
+
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.5);
 }
 
 * {
@@ -126,6 +129,35 @@ body {
 .ghost:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+/* Header button cluster: theme toggle + Clear */
+.header-actions {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Square icon button (theme toggle) */
+.icon-btn {
+  flex: none;
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  border-radius: 8px;
+  font-size: 1.05rem;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+.icon-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 /* ── Messages ───────────────────────────────────────────── */
@@ -300,6 +332,35 @@ body {
 }
 .metrics-detail {
   opacity: 0.7;
+}
+
+/* Per-answer action row (Copy) under an assistant message */
+.msg-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 8px;
+}
+.copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.72rem;
+  padding: 3px 9px;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+.copy-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.copy-btn.copied {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 /* Source pills under an answer */

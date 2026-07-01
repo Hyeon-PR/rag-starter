@@ -6,6 +6,20 @@
     <meta name="color-scheme" content="light dark" />
     <meta name="description" content="Retrieval-augmented chat over the Apollo document corpus, with inline source citations." />
     <title>RAG Chat — Apollo corpus</title>
+    <script>
+      // Resolve the theme before first paint to avoid a light/dark flash: a
+      // previously saved choice wins, otherwise fall back to the OS preference.
+      // The React app keeps this attribute and localStorage in sync at runtime.
+      (function () {
+        try {
+          var saved = localStorage.getItem('theme');
+          var dark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+          document.documentElement.dataset.theme = saved || (dark ? 'dark' : 'light');
+        } catch (e) {
+          /* localStorage/matchMedia unavailable — fall back to the CSS default */
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

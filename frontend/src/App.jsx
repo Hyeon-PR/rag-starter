@@ -102,6 +102,52 @@ function Sources({ sources }) {
   )
 }
 
+// Copy the raw answer text to the clipboard, with a brief "Copied" confirmation.
+// Falls back to a hidden-textarea + execCommand when the async Clipboard API is
+// unavailable (older browsers or a non-secure context).
+function CopyButton({ text }) {
+  const [copied, setCopied] = useState(false)
+  const timerRef = useRef(null)
+
+  useEffect(() => () => clearTimeout(timerRef.current), [])
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(text)
+    } catch {
+      const ta = document.createElement('textarea')
+      ta.value = text
+      ta.style.position = 'fixed'
+      ta.style.opacity = '0'
+      document.body.appendChild(ta)
+      ta.select()
+      try {
+        document.execCommand('copy')
+      } catch {
+        /* nothing more we can do; leave `copied` false */
+        document.body.removeChild(ta)
+        return
+      }
+      document.body.removeChild(ta)
+    }
+    setCopied(true)
+    clearTimeout(timerRef.current)
+    timerRef.current = setTimeout(() => setCopied(false), 1500)
+  }
+
+  return (
+    <button
+      type="button"
+      className={`copy-btn${copied ? ' copied' : ''}`}
+      onClick={copy}
+      title="Copy answer to clipboard"
+      aria-label={copied ? 'Answer copied' : 'Copy answer'}
+    >
+      {copied ? '✓ Copied' : '⧉ Copy'}
+    </button>
+  )
+}
+
 function Message({ m, onRetry, sending }) {
   if (m.role === 'user') {
     return (
@@ -155,6 +201,9 @@ function Message({ m, onRetry, sending }) {
           </div>
         )}
         {m.meta && <Metrics meta={m.meta} />}
+        <div className="msg-actions">
+          <CopyButton text={m.text} />
+        </div>
       </div>
     </div>
   )
@@ -164,12 +213,35 @@ export default function App() {
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
   const [status, setStatus] = useState('idle') // 'idle' | 'sending'
+  // Seeded from the attribute the inline script in index.html resolved before
+  // paint (saved choice, else OS preference). Until the user toggles, we don't
+  // persist — so the app keeps following the OS on each visit.
+  const [theme, setTheme] = useState(
+    () => (document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light'),
+  )
   const abortRef = useRef(null)
   const taRef = useRef(null)
   const bottomRef = useRef(null)
 
   const sending = status === 'sending'
   const isEmpty = messages.length === 0
+
+  // Reflect the current theme onto <html> so the CSS variables switch.
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme
+  }, [theme])
+
+  function toggleTheme() {
+    setTheme((t) => {
+      const next = t === 'dark' ? 'light' : 'dark'
+      try {
+        localStorage.setItem('theme', next)
+      } catch {
+        /* private mode / storage disabled — the toggle still works this session */
+      }
+      return next
+    })
+  }
 
   // Keep the latest message (or the typing indicator) in view.
   useEffect(() => {
@@ -308,14 +380,24 @@ export default function App() {
             its <code>14 CFR §</code> source, or the system abstains.
           </p>
         </div>
-        <button
-          className="ghost"
-          onClick={clearChat}
-          disabled={isEmpty || sending}
-          title="Clear the conversation"
-        >
-          Clear
-        </button>
+        <div className="header-actions">
+          <button
+            className="icon-btn"
+            onClick={toggleTheme}
+            title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+            aria-label={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+          >
+            {theme === 'dark' ? '☀️' : '🌙'}
+          </button>
+          <button
+            className="ghost"
+            onClick={clearChat}
+            disabled={isEmpty || sending}
+            title="Clear the conversation"
+          >
+            Clear
+          </button>
+        </div>
       </header>
 
       <main className="messages" role="log" aria-live="polite" aria-relevant="additions">
