@@ -194,7 +194,9 @@ function Message({ m, onRetry, sending }) {
         {verify.total > 0 && (
           <div className={`verify ${verify.invalid.length ? 'warn' : 'ok'}`}>
             {verify.invalid.length === 0
-              ? `✓ ${verify.valid.length} citation${verify.valid.length === 1 ? '' : 's'} verified against sources`
+              ? `✓ ${verify.valid.length} citation${verify.valid.length === 1 ? '' : 's'} resolve${
+                  verify.valid.length === 1 ? 's' : ''
+                } to a retrieved source`
               : `⚠ ${verify.invalid.length} unverified reference${
                   verify.invalid.length === 1 ? '' : 's'
                 } (${verify.invalid.map((n) => `[${n}]`).join(', ')}) — no matching source`}
