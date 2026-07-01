@@ -16,6 +16,7 @@ Needs the active backend's credentials (see .env.example): VOYAGE_API_KEY for
 voyage, or GEMINI_API_KEY / Vertex-AI ADC for gemini.
 """
 import json
+import logging
 import math
 import os
 import pickle
@@ -214,6 +215,12 @@ RERANK = os.environ.get("RERANK", "").lower() in ("1", "true", "yes")
 RERANK_MODEL = os.environ.get("RERANK_MODEL", "rerank-2.5")
 RERANK_POOL = int(os.environ.get("RERANK_POOL", "30"))         # fused candidates to rerank
 
+# Retrieval trace logger. Library code only *gets* a logger; the application
+# (backend/app.py) configures level + handlers. On by default at INFO there, so
+# you can see which channels ran and exactly which chunks were retrieved;
+# quiet it with RAG_LOG_LEVEL=WARNING.
+_log = logging.getLogger("rag.retrieval")
+
 _TOKEN_RE = re.compile(r"[a-z0-9]+(?:\.[a-z0-9]+)*")  # keeps dotted §-numbers (61.3) whole
 _SEC_RE = re.compile(r"\b(\d{1,3}\.\d+[a-z]?)\b")     # 61.3, 121.439, 25.1309a
 _PART_RE = re.compile(r"\bpart\s+(\d{1,3})\b", re.IGNORECASE)
@@ -334,6 +341,39 @@ def _rerank(query: str, cand_indices, records: list[dict]) -> "list[tuple[int, f
     return [(int(cand_indices[r.index]), float(r.relevance_score)) for r in result.results]
 
 
+def _log_hits(query, hits, *, hybrid, reranked, sections, parts, n_total):
+    """Emit a retrieval trace: which channels ran + the ranked chunks returned.
+
+    Logs the exact chunk identity (cfr_citation / source / chunk_index) and every
+    score, so a wrong answer can be traced to what retrieval actually surfaced.
+    Router-pinned chunks are tagged. Skipped entirely if INFO is disabled.
+    """
+    if not _log.isEnabledFor(logging.INFO):
+        return
+    mode = "hybrid(dense+bm25+router)" if hybrid else "dense"
+    router = ""
+    if hybrid and (sections or parts):
+        router = f" router[sections={sorted(sections)} parts={sorted(parts)}]"
+    _log.info(
+        "retrieval q=%r | backend=%s mode=%s rerank=%s%s | %d of %d chunks",
+        query, EMBED_BACKEND, mode, "on" if reranked else "off", router, len(hits), n_total,
+    )
+    for rank, h in enumerate(hits, 1):
+        pinned = ""
+        if h.get("section") in sections:
+            pinned = " [ROUTER:section]"
+        elif h.get("part") in parts:
+            pinned = " [ROUTER:part]"
+        rr = f" rerank={h['rerank_score']:.3f}" if "rerank_score" in h else ""
+        _log.info(
+            "  #%d %-14s score=%.4f dense=%.3f bm25=%.2f%s%s  src=%s chunk=%s",
+            rank,
+            h.get("cfr_citation") or h.get("section") or "?",
+            h["score"], h["dense_score"], h["lexical_score"], rr, pinned,
+            h.get("source"), h.get("chunk_index"),
+        )
+
+
 def search(query: str, records: list[dict], k: int = 5) -> list[dict]:
     """Return the top-k records most relevant to the query.
 
@@ -355,7 +395,9 @@ def search(query: str, records: list[dict], k: int = 5) -> list[dict]:
         kk = min(k, n)
         top = np.argpartition(-sims, kk - 1)[:kk]
         top = top[np.argsort(-sims[top])]
-        return [_make_hit(records[i], sims[i], 0.0, sims[i]) for i in top]
+        hits = [_make_hit(records[i], sims[i], 0.0, sims[i]) for i in top]
+        _log_hits(query, hits, hybrid=False, reranked=False, sections=set(), parts=set(), n_total=n)
+        return hits
 
     bm = _bm25(records).scores(_tokenize(query))
     sections, parts = _query_refs(query)
@@ -397,6 +439,10 @@ def search(query: str, records: list[dict], k: int = 5) -> list[dict]:
             h["rerank_score"] = rerank_score[i]
             h["score"] = rerank_score[i]  # reflect the final (rerank) ordering
         hits.append(h)
+    _log_hits(
+        query, hits, hybrid=True, reranked=bool(rerank_score),
+        sections=sections, parts=parts, n_total=n,
+    )
     return hits
 
 

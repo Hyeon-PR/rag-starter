@@ -111,6 +111,38 @@ Open <http://localhost:5173>.
 | `RRF_K` / `SECTION_BONUS` / `PART_BONUS` | `60` / `0.5` / `0.003` | fusion + §/Part router tuning |
 | `RERANK` | off | `1` → Voyage cross-encoder rerank of the fused pool (needs `VOYAGE_API_KEY`) |
 
+## Debugging retrieval
+
+The backend logs a full trace per request (default level `INFO`; quiet with
+`RAG_LOG_LEVEL=WARNING`) so you can see *why* an answer came out the way it did —
+essential for judging whether it's grounded in the right section:
+
+- **which channels ran** — `mode=hybrid(dense+bm25+router)` vs `dense`,
+  `rerank on/off`, and the `§`/Part the router extracted from the query;
+- **the exact chunks retrieved** — rank, `cfr_citation`, the
+  `score`/`dense`/`bm25`(/`rerank`) values, `[ROUTER:…]` tags, and
+  `source` + `chunk_index`;
+- **the gate decision** — `top_dense` vs the abstain threshold (`ANSWER` / `ABSTAIN`);
+- **which chunks the answer actually cited** — each `[n]` mapped to its
+  `cfr_citation` / `source` / `chunk_index` with a text snippet, plus a warning
+  for any `[n]` the model emitted with no matching source;
+- **cost + latency** — the model's `input` / `output` token counts and per-stage
+  latency (`retrieval`, which includes the query-embedding round-trip; `llm`; and
+  `total`).
+
+Each request is **single-turn / stateless** — only the current question plus the
+retrieved context is sent to the model (no prior conversation), so `input` tokens
+≈ system prompt + context + question.
+
+```
+INFO rag.chat: gate top_dense=0.731 >= 0.66 -> ANSWER (5 chunks in context)
+INFO rag.retrieval: retrieval q='what does 91.3 say...' | backend=gemini mode=hybrid(dense+bm25+router) rerank=off router[sections=['91.3'] parts=[91]] | 5 of 10744 chunks
+INFO rag.retrieval:   #1 14 CFR 91.3    score=0.53 dense=0.73 bm25=1.36 [ROUTER:section]  src=part-91.xml chunk=0
+INFO rag.chat: llm model=claude-sonnet-4-6 in=812 out=143 | latency retrieval=118ms llm=1274ms total=1392ms
+INFO rag.chat: answer cited 1 of 5 retrieved chunks:
+INFO rag.chat:   [1] 14 CFR 91.3 src=part-91.xml chunk=0 :: The pilot in command is directly responsible for, and is the final authority...
+```
+
 ## Notes
 
 - `.env` holds secrets and is gitignored. `index.pkl` and `data/` are

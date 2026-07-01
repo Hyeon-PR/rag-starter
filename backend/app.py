@@ -9,9 +9,11 @@ TODO:
   4. Build the user_content with CONTEXT + QUESTION.
   5. Parse citation numbers from the answer; return them to the frontend.
 """
+import logging
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 # Make the parent directory importable so we can use indexer.py
@@ -26,13 +28,22 @@ from indexer import load_index, search
 
 load_dotenv()  # ANTHROPIC_API_KEY from .env
 
+# Logging on by default at INFO so the retrieval trace (indexer's rag.retrieval
+# logger) and the per-request gate + citation decisions below are visible while
+# debugging answer quality. Quiet it with RAG_LOG_LEVEL=WARNING.
+logging.basicConfig(
+    level=os.environ.get("RAG_LOG_LEVEL", "INFO").upper(),
+    format="%(levelname)s %(name)s: %(message)s",
+)
+log = logging.getLogger("rag.chat")
+
 app = Flask(__name__)
 CORS(app)
 client = Anthropic()
 
 # Load the index once at startup. Fails fast if no index — run `python indexer.py` first.
 INDEX = load_index()
-print(f"Loaded {len(INDEX)} chunks from disk")
+log.info("loaded %d chunks from index", len(INDEX))
 
 
 # ════════════════════════════════════════════════════════════════
@@ -66,6 +77,7 @@ sources do not cover."""
 # backend; env-tunable.
 TOP_K = int(os.environ.get("RETRIEVAL_K", "5"))
 MIN_TOP_SCORE = float(os.environ.get("RETRIEVAL_MIN_SCORE", "0.66"))
+CHAT_MODEL = os.environ.get("CHAT_MODEL", "claude-sonnet-4-6")
 ABSTAIN_REPLY = (
     "The provided 14 CFR sources don't contain anything relevant to that question, "
     "so I can't answer it from the corpus."
@@ -75,9 +87,13 @@ ABSTAIN_REPLY = (
 @app.route("/api/chat", methods=["POST"])
 def chat():
     user_message = request.json["message"]
+    log.info("chat q=%r", user_message)
 
-    # Retrieve the top-K most relevant chunks.
+    # Retrieve the top-K most relevant chunks. indexer's rag.retrieval logger
+    # traces which channels ran (dense/BM25/router/rerank) and the exact chunks.
+    t_start = time.perf_counter()
     hits = search(user_message, INDEX, k=TOP_K)
+    retrieval_ms = (time.perf_counter() - t_start) * 1000  # incl. query-embedding round-trip
 
     # Relevance gate: if the best dense-cosine match is below the bar, abstain up
     # front — no LLM call, no chance to hallucinate an answer the corpus can't
@@ -85,20 +101,40 @@ def chat():
     # rank-based and not comparable to the calibrated cosine threshold.
     top_dense = max((h["dense_score"] for h in hits), default=0.0)
     if not hits or top_dense < MIN_TOP_SCORE:
+        log.info(
+            "gate top_dense=%.3f < %.2f -> ABSTAIN (no LLM call) | retrieval=%.0fms in=0 out=0",
+            top_dense, MIN_TOP_SCORE, retrieval_ms,
+        )
         return jsonify({"reply": ABSTAIN_REPLY, "citations": [], "abstained": True})
+    log.info(
+        "gate top_dense=%.3f >= %.2f -> ANSWER (%d chunks in context)",
+        top_dense, MIN_TOP_SCORE, len(hits),
+    )
 
     # Augment the prompt with a numbered context block so the model can ground
     # its answer and cite sources.
     context = "\n\n".join(f"[{i + 1}] {h['text']}" for i, h in enumerate(hits))
     user_content = f"CONTEXT:\n{context}\n\nQUESTION:\n{user_message}"
 
+    # Single-turn: only this question + the retrieved context is sent — no prior
+    # conversation is threaded in — so input_tokens ≈ system + context + question.
+    t_llm = time.perf_counter()
     resp = client.messages.create(
-        model="claude-sonnet-4-6",
+        model=CHAT_MODEL,
         max_tokens=1024,
         system=SYSTEM_PROMPT,
         messages=[{"role": "user", "content": user_content}],
     )
+    llm_ms = (time.perf_counter() - t_llm) * 1000
     answer = resp.content[0].text
+
+    # Token usage + latency (total = retrieval, incl. embedding round-trip, + LLM).
+    usage = resp.usage
+    log.info(
+        "llm model=%s in=%d out=%d | latency retrieval=%.0fms llm=%.0fms total=%.0fms",
+        CHAT_MODEL, usage.input_tokens, usage.output_tokens,
+        retrieval_ms, llm_ms, (time.perf_counter() - t_start) * 1000,
+    )
 
     # ────────────────────────────────────────────────────────────
     # TODO — citation extraction
@@ -109,6 +145,28 @@ def chat():
     # ────────────────────────────────────────────────────────────
 
     citations = _build_citations(answer, hits)
+
+    # Log exactly which retrieved chunks the answer cited (with a text snippet),
+    # and flag any [n] the model emitted that has no matching source. This is the
+    # crux of debugging whether an answer is grounded in the right reference.
+    used = [int(x) for x in re.findall(r"\[(\d+)\]", answer)]
+    valid_ns = {c["n"] for c in citations}
+    invalid = sorted({x for x in used if x not in valid_ns})
+    if citations:
+        log.info("answer cited %d of %d retrieved chunks:", len(citations), len(hits))
+        for c in citations:
+            h = hits[c["n"] - 1]
+            snippet = " ".join(h.get("text", "").split())[:140]
+            log.info(
+                "  [%d] %s src=%s chunk=%s :: %s",
+                c["n"],
+                h.get("cfr_citation") or h.get("section") or "?",
+                h.get("source"), h.get("chunk_index"), snippet,
+            )
+    else:
+        log.info("answer cited no sources")
+    if invalid:
+        log.warning("answer used citation(s) with no matching source: %s", invalid)
 
     return jsonify({"reply": answer, "citations": citations})
 
