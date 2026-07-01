@@ -44,9 +44,9 @@ function Metrics({ meta }) {
   )
 }
 
-// Sources under an answer. Each cited chunk links out to the official eCFR
-// section (new tab) so the user can jump straight to the source material, and
-// can expand to show the exact retrieved passage in-app.
+// Sources under an answer. Each cited chunk shows its CFR text reference
+// (e.g. "14 CFR § 91.3"); clicking a source expands the exact retrieved passage
+// in-app so the user can verify the claim without leaving the page.
 function Sources({ sources }) {
   const [openN, setOpenN] = useState(null)
   if (!sources.length) return null
@@ -54,47 +54,36 @@ function Sources({ sources }) {
   return (
     <div className="sources">
       <span className="sources-label">Sources</span>
-      {sources.map((c) => (
-        <span key={c.n} className="source-item">
-          {c.url ? (
-            <a
-              className="source-pill link"
-              href={c.url}
-              target="_blank"
-              rel="noopener noreferrer"
-              title={`Open ${c.cfr_citation || c.source} on eCFR`}
-            >
-              [{c.n}] {c.cfr_citation || c.source} <span aria-hidden="true">↗</span>
-            </a>
-          ) : (
-            <span className="source-pill" title={`chunk ${c.chunk_index}`}>
-              [{c.n}] {c.cfr_citation || c.source}
+      {sources.map((c) => {
+        const isOpen = openN === c.n
+        const label = c.cfr_citation || c.source
+        // With no retrieved text there is nothing to expand — render a plain,
+        // non-interactive text reference.
+        if (!c.text) {
+          return (
+            <span key={c.n} className="source-pill" title={`chunk ${c.chunk_index}`}>
+              [{c.n}] {label}
             </span>
-          )}
-          {c.text && (
-            <button
-              type="button"
-              className="source-toggle"
-              aria-expanded={openN === c.n}
-              onClick={() => setOpenN(openN === c.n ? null : c.n)}
-            >
-              {openN === c.n ? '▾ hide text' : '▸ source text'}
-            </button>
-          )}
-        </span>
-      ))}
+          )
+        }
+        return (
+          <button
+            key={c.n}
+            type="button"
+            className={`source-pill toggle${isOpen ? ' open' : ''}`}
+            aria-expanded={isOpen}
+            onClick={() => setOpenN(isOpen ? null : c.n)}
+            title="Show the exact retrieved passage"
+          >
+            [{c.n}] {label}{' '}
+            <span className="caret" aria-hidden="true">{isOpen ? '▾' : '▸'}</span>
+          </button>
+        )
+      })}
       {open && (
         <blockquote className="passage">
           <span className="passage-head">
             [{open.n}] {open.cfr_citation || open.source}
-            {open.url && (
-              <>
-                {' · '}
-                <a href={open.url} target="_blank" rel="noopener noreferrer">
-                  open on eCFR ↗
-                </a>
-              </>
-            )}
           </span>
           {open.text}
         </blockquote>
