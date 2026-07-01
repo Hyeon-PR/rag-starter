@@ -202,8 +202,59 @@ body {
   box-shadow: none;
 }
 
+/* Rendered markdown answer. Block elements control spacing now, so no
+   pre-wrap here (that would double the gaps between paragraphs/lists). */
 .answer {
-  white-space: pre-wrap;
+  white-space: normal;
+}
+.answer > :first-child {
+  margin-top: 0;
+}
+.answer > :last-child {
+  margin-bottom: 0;
+}
+.answer p {
+  margin: 0 0 8px;
+}
+.answer h2,
+.answer h3,
+.answer h4,
+.answer h5,
+.answer h6 {
+  margin: 12px 0 6px;
+  font-size: 1rem;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.answer ul,
+.answer ol {
+  margin: 6px 0 8px;
+  padding-left: 1.4em;
+}
+.answer li {
+  margin: 2px 0;
+}
+.answer li::marker {
+  color: var(--muted);
+}
+.answer code {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.86em;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 0.5px 5px;
+}
+.answer blockquote {
+  margin: 8px 0;
+  padding: 2px 0 2px 12px;
+  border-left: 3px solid var(--border);
+  color: var(--muted);
+}
+.answer hr {
+  border: 0;
+  border-top: 1px solid var(--border);
+  margin: 12px 0;
 }
 
 /* Inline [n] citation badge */
@@ -218,6 +269,25 @@ body {
   margin: 0 1px;
   vertical-align: super;
   cursor: help;
+}
+/* A [n] marker with no matching source — flagged, never passed off as real. */
+.cite.invalid {
+  background: var(--error-bg);
+  color: var(--error-ink);
+}
+
+/* Citation-token verification status under an answer */
+.verify {
+  margin-top: 8px;
+  font-size: 0.72rem;
+  letter-spacing: 0.01em;
+}
+.verify.ok {
+  color: var(--muted);
+}
+.verify.warn {
+  color: var(--error-ink);
+  font-weight: 600;
 }
 
 /* Source pills under an answer */

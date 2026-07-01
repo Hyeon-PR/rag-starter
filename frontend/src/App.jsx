@@ -1,48 +1,21 @@
 import { useEffect, useRef, useState } from 'react'
 
+import { Markdown, verifyCitations } from './markdown.jsx'
+
 // Monotonic message ids (stable React keys without depending on array index).
 let idSeq = 0
 const nextId = () => ++idSeq
 
 const EXAMPLES = [
-  'What was the cause of the Apollo 1 fire?',
-  'Which Apollo missions landed on the Moon?',
-  'Compare the moonwalk durations of Apollo 11 and Apollo 17.',
-  'List Apollo missions that used the Saturn V rocket.',
-  'What is the Artemis program?',
+  'What does 14 CFR 91.3 say about the authority of the pilot in command?',
+  'What are the requirements to be issued a private pilot certificate?',
+  'When is a flight review required under part 61?',
+  'What are the fuel requirements for VFR flight during the day?',
+  "What's a good recipe for chocolate-chip cookies?",
 ]
 
 // Anthropic + retrieval can take a while; give it room but don't hang forever.
 const REQUEST_TIMEOUT_MS = 90_000
-
-// Render an answer, turning inline [n] markers into citation badges.
-// Unknown numbers (not in the citation set) are left as plain text so we never
-// pretend a hallucinated marker is a real source.
-function AnswerText({ text, citations }) {
-  const byNum = new Map((citations || []).map((c) => [c.n, c]))
-  const parts = []
-  const re = /\[(\d+)\]/g
-  let last = 0
-  let key = 0
-  let m
-  while ((m = re.exec(text)) !== null) {
-    if (m.index > last) parts.push(text.slice(last, m.index))
-    const n = Number(m[1])
-    const c = byNum.get(n)
-    if (c) {
-      parts.push(
-        <sup key={`c${key++}`} className="cite" title={`${c.source} · chunk ${c.chunk_index}`}>
-          {n}
-        </sup>,
-      )
-    } else {
-      parts.push(m[0])
-    }
-    last = re.lastIndex
-  }
-  if (last < text.length) parts.push(text.slice(last))
-  return <>{parts}</>
-}
 
 function Message({ m, onRetry, sending }) {
   if (m.role === 'user') {
@@ -74,12 +47,17 @@ function Message({ m, onRetry, sending }) {
 
   // assistant
   const sources = m.citations || []
+  // Verify the [n] markers in the final answer against the sources the backend
+  // actually returned, so the UI can vouch for what it renders (and flag any
+  // reference with no matching source instead of quietly trusting it).
+  const verify = verifyCitations(m.text, sources)
   return (
     <div className="row assistant">
       <div className="avatar" aria-hidden="true">A</div>
       <div className="bubble">
         <div className="answer">
-          <AnswerText text={m.text} citations={sources} />
+          {/* Pass m.citations (stable ref) not `sources` (fresh []) so memo holds. */}
+          <Markdown text={m.text} citations={m.citations} />
         </div>
         {sources.length > 0 && (
           <div className="sources">
@@ -89,6 +67,15 @@ function Message({ m, onRetry, sending }) {
                 [{c.n}] {c.source}
               </span>
             ))}
+          </div>
+        )}
+        {verify.total > 0 && (
+          <div className={`verify ${verify.invalid.length ? 'warn' : 'ok'}`}>
+            {verify.invalid.length === 0
+              ? `✓ ${verify.valid.length} citation${verify.valid.length === 1 ? '' : 's'} verified against sources`
+              : `⚠ ${verify.invalid.length} unverified reference${
+                  verify.invalid.length === 1 ? '' : 's'
+                } (${verify.invalid.map((n) => `[${n}]`).join(', ')}) — no matching source`}
           </div>
         )}
       </div>
@@ -237,9 +224,10 @@ export default function App() {
     <div className="app">
       <header className="app-header">
         <div className="brand">
-          <h1>RAG Chat</h1>
+          <h1>14 CFR RAG Chat</h1>
           <p className="subtitle">
-            Grounded answers over the Apollo corpus — every claim cited to a source file.
+            Grounded answers over Title 14 CFR (FAA aviation regulations) — every claim cited to
+            its <code>14 CFR §</code> source, or the system abstains.
           </p>
         </div>
         <button
@@ -255,8 +243,8 @@ export default function App() {
       <main className="messages" role="log" aria-live="polite" aria-relevant="additions">
         {isEmpty ? (
           <div className="empty">
-            <div className="empty-emoji" aria-hidden="true">🚀</div>
-            <p>Ask a question about the Apollo program. Try one of these:</p>
+            <div className="empty-emoji" aria-hidden="true">✈️</div>
+            <p>Ask a question about the FAA regulations in 14 CFR. Try one of these:</p>
             <div className="examples">
               {EXAMPLES.map((ex) => (
                 <button key={ex} className="chip" onClick={() => send(ex)} disabled={sending}>
@@ -293,7 +281,7 @@ export default function App() {
             value={input}
             onChange={onInput}
             onKeyDown={onKeyDown}
-            placeholder="Ask about Apollo missions…  (Enter to send · Shift+Enter for a new line)"
+            placeholder="Ask about 14 CFR…  (Enter to send · Shift+Enter for a new line)"
             rows={1}
             autoFocus
             aria-label="Your question"
